@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KindFriend Chat</title>
+  <style>
+    body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
+    #chat { background: white; padding: 10px; border-radius: 5px; height: 400px; overflow-y: auto; }
+    .user { color: blue; margin: 5px 0; }
+    .bot { color: green; margin: 5px 0; }
+    form { margin-top: 10px; display: flex; gap: 5px; }
+    input { flex: 1; padding: 8px; }
+    button { padding: 8px 12px; }
+    small { display: block; margin-top: 10px; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>KindFriend</h1>
+  <div id="chat"></div>
+  <form id="chat-form">
+    <input id="message" autocomplete="off" placeholder="Type your message..." />
+    <button>Send</button>
+  </form>
+  <small>KindFriend is a supportive companion
