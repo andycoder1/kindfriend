@@ -6,38 +6,34 @@ import csv
 import datetime
 import sqlite3
 
-from fastapi import FastAPI, Request, Response, Query
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-
-# --- OpenAI SDK (v1.x) ---
 from openai import OpenAI
 
 # =========================
 # Config & Persistent Paths
 # =========================
-# Use a persistent folder if provided by the host (e.g., /opt/data on Render)
 DATA_DIR = os.getenv("DATA_DIR", "")
 DB_FILE = os.path.join(DATA_DIR, "kindfriend.db") if DATA_DIR else "kindfriend.db"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")  # change if you prefer another available model
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
-# System prompt to guide tone/safety
 SYSTEM_PROMPT = (
     "You are KindFriend: a warm, respectful companion. You are not a therapist. "
     "If the user mentions self-harm or immediate danger, kindly suggest contacting UK Samaritans (116 123), "
     "NHS 111, or emergency services (999). Be concise and kind."
 )
 
-# OpenAI client (reads key from env)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
 # Database (SQLite)
 # =========================
 def init_db():
-    os.makedirs(DATA_DIR, exist_ok=True) if DATA_DIR else None
+    if DATA_DIR:
+        os.makedirs(DATA_DIR, exist_ok=True)
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
         cur.execute("""
@@ -86,7 +82,6 @@ def delete_session(session_id: str):
         cur.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         conn.commit()
 
-# Initialize DB at import time
 init_db()
 
 # =========================
@@ -99,7 +94,7 @@ INDEX_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KindFriend</title>
 
-  <!-- Custom KF favicon with cache-buster -->
+  <!-- KF favicon with cache-buster -->
   <link rel="icon" href='data:image/svg+xml;utf8,
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
@@ -111,7 +106,7 @@ INDEX_HTML = """<!doctype html>
   <circle cx="32" cy="32" r="30" fill="url(%23g)" />
   <text x="32" y="38" font-size="24" font-family="Arial Rounded MT Bold, Helvetica, sans-serif" text-anchor="middle" fill="white">KF</text>
   <path d="M22 44 q10 8 20 0" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>
-</svg>?v=3'>
+</svg>?v=4'>
 
   <style>
     :root {
@@ -157,7 +152,7 @@ INDEX_HTML = """<!doctype html>
     .app { width: min(900px, 100%); display: grid; grid-template-rows: auto 1fr auto; gap: 16px; }
     .card { background: var(--card); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
     .header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
-    .logo { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, var(--brand), var(--brand-2)); color: white; font-weight: 700; letter-spacing: 0.5px; box-shadow: var(--shadow); }
+    .logo { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, var(--brand), var(--brand-2)); color: white; font-weight: 700; }
     .title-wrap { flex: 1; }
     .title { margin: 0; font-size: 18px; font-weight: 800; }
     .subtitle { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
@@ -306,9 +301,8 @@ INDEX_HTML = """<!doctype html>
 # =========================
 app = FastAPI()
 
-# Always return JSON on unhandled errors
 @app.exception_handler(Exception)
-async def all_exception_handler(request: Request, exc: Exception):
+async def all_exception_handler(request, exc):
     return JSONResponse({"error": "Server error", "error_detail": str(exc)}, status_code=500)
 
 app.add_middleware(
@@ -334,17 +328,12 @@ async def api_chat(request: Request):
     if not user_message:
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    # Session
     session_id = request.cookies.get("session_id") or str(uuid.uuid4())
-
-    # Save user message
     save_message(session_id, "user", user_message)
 
-    # Build context (system + last 20 messages)
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
     history.extend(get_recent_messages(session_id, limit=20))
 
-    # Call OpenAI
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -355,10 +344,8 @@ async def api_chat(request: Request):
     except Exception as e:
         return JSONResponse({"error": "OpenAI error", "error_detail": str(e)}, status_code=502)
 
-    # Save bot reply
     save_message(session_id, "assistant", reply)
 
-    # Return reply and ensure cookie is set
     out = JSONResponse({"reply": reply})
     out.set_cookie("session_id", session_id, httponly=True, samesite="Lax", max_age=60*60*24*90)
     return out
@@ -392,8 +379,27 @@ async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|cs
         text = "\n".join(lines) + "\n"
         return PlainTextResponse(
             text,
-            headers={"Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"'}
+            headers={
+                "Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"',
+                "Content-Type": "text/plain; charset=utf-8",
+            },
         )
+
+    # CSV export
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["time_utc", "role", "content", "archived"])
+    for role, content, ts, archived in msgs:
+        t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
+        writer.writerow([t, role, content, archived])
+    csv_data = output.getvalue()
+    return PlainTextResponse(
+        csv_data,
+        headers={
+            "Content-Disposition": f'attachment; filename="kindfriend_{now}.csv"',
+            "Content-Type": "text/csv; charset=utf-8",
+        },
+    )
 
     # CSV
     output = io.StringIO()
@@ -406,8 +412,9 @@ async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|cs
     return PlainTextResponse(
         csv_data,
         headers={
-            "Content-Disposition": f'attachment; filename="kindfriend_{now}.csv'",
+            "Content-Disposition": f"attachment; filename=kindfriend_{now}.csv",
             "Content-Type": "text/csv; charset=utf-8",
-        }
+        },
     )
+
 
