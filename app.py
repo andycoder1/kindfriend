@@ -1,47 +1,97 @@
 import os
-import sqlite3
-import uuid
 import time
-import datetime
-import csv
+import uuid
 import io
-from fastapi import FastAPI, Request, Response
+import csv
+import datetime
+import sqlite3
+
+from fastapi import FastAPI, Request, Response, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import FileResponse
-import openai
 
-# --- Config ---
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-MODEL_NAME = "gpt-4o-mini"  # change if you prefer another available model
+# --- OpenAI SDK (v1.x) ---
+from openai import OpenAI
 
-# --- DB init ---
+# =========================
+# Config & Persistent Paths
+# =========================
+# Use a persistent folder if provided by the host (e.g., /opt/data on Render)
+DATA_DIR = os.getenv("DATA_DIR", "")
+DB_FILE = os.path.join(DATA_DIR, "kindfriend.db") if DATA_DIR else "kindfriend.db"
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")  # change if you prefer another available model
+
+# System prompt to guide tone/safety
+SYSTEM_PROMPT = (
+    "You are KindFriend: a warm, respectful companion. You are not a therapist. "
+    "If the user mentions self-harm or immediate danger, kindly suggest contacting UK Samaritans (116 123), "
+    "NHS 111, or emergency services (999). Be concise and kind."
+)
+
+# OpenAI client (reads key from env)
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# =========================
+# Database (SQLite)
+# =========================
 def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True) if DATA_DIR else None
     with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            session_id TEXT,
-            role TEXT,
-            content TEXT,
-            ts REAL,
-            archived INTEGER DEFAULT 0
-        )
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                session_id TEXT NOT NULL,
+                role       TEXT NOT NULL,
+                content    TEXT NOT NULL,
+                ts         REAL NOT NULL,
+                archived   INTEGER NOT NULL DEFAULT 0
+            )
         """)
         conn.commit()
 
+def save_message(session_id: str, role: str, content: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content, ts, archived) VALUES (?, ?, ?, ?, 0)",
+            (session_id, role, content, time.time()),
+        )
+        conn.commit()
+
+def get_recent_messages(session_id: str, limit: int = 20):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY ts DESC LIMIT ?",
+            (session_id, limit),
+        )
+        rows = cur.fetchall()
+    rows.reverse()
+    return [{"role": r, "content": c} for (r, c) in rows]
+
+def get_all_messages(session_id: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content, ts, archived FROM messages WHERE session_id = ? ORDER BY ts ASC",
+            (session_id,),
+        )
+        return cur.fetchall()
+
+def delete_session(session_id: str):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+# Initialize DB at import time
 init_db()
 
-# --- FastAPI ---
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- HTML / Frontend ---
+# =========================
+# Frontend (HTML/JS/CSS)
+# =========================
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -61,7 +111,7 @@ INDEX_HTML = """<!doctype html>
   <circle cx="32" cy="32" r="30" fill="url(%23g)" />
   <text x="32" y="38" font-size="24" font-family="Arial Rounded MT Bold, Helvetica, sans-serif" text-anchor="middle" fill="white">KF</text>
   <path d="M22 44 q10 8 20 0" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>
-</svg>?v=2'>
+</svg>?v=3'>
 
   <style>
     :root {
@@ -158,8 +208,8 @@ INDEX_HTML = """<!doctype html>
   </div>
 
   <script>
-    const root = document.documentElement;
-    const saved = localStorage.getItem('kf-theme');
+    const root   = document.documentElement;
+    const saved  = localStorage.getItem('kf-theme');
     if (saved) root.setAttribute('data-theme', saved);
 
     const chat   = document.getElementById('chat');
@@ -172,9 +222,9 @@ INDEX_HTML = """<!doctype html>
     const themeBtn = document.getElementById('theme');
 
     themeBtn.addEventListener('click', () => {
-      const cur = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-      root.setAttribute('data-theme', cur);
-      localStorage.setItem('kf-theme', cur);
+      const next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('kf-theme', next);
     });
 
     const addBubble = (text, who) => {
@@ -207,11 +257,17 @@ INDEX_HTML = """<!doctype html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: msg })
         });
-        const data = await res.json();
-        if (data.error) {
-          addBubble('Error: ' + (data.error_detail || data.error), 'bot');
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const data = await res.json();
+          if (data.error) {
+            addBubble('Error: ' + (data.error_detail || data.error), 'bot');
+          } else {
+            addBubble(data.reply, 'bot');
+          }
         } else {
-          addBubble(data.reply, 'bot');
+          const text = await res.text();
+          addBubble('Server error: ' + text, 'bot');
         }
       } catch (err) {
         addBubble('Network error: ' + err.message, 'bot');
@@ -221,12 +277,22 @@ INDEX_HTML = """<!doctype html>
     };
 
     send.addEventListener('click', sendMessage);
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendMessage(); } });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
 
     newBtn.addEventListener('click', async () => {
-      await fetch('/api/new', { method: 'POST' });
-      chat.innerHTML = '';
-      addBubble('New chat started.', 'bot');
+      try {
+        const res = await fetch('/api/new', { method: 'POST' });
+        const ok  = (res.headers.get('content-type') || '').includes('application/json') && (await res.json()).ok;
+        chat.innerHTML = '';
+        addBubble(ok ? 'New chat started.' : 'Error starting new chat.', 'bot');
+      } catch (e) {
+        addBubble('Network error: ' + e.message, 'bot');
+      }
     });
 
     dlTxt.addEventListener('click', () => { window.location = '/api/export?fmt=txt'; });
@@ -235,90 +301,113 @@ INDEX_HTML = """<!doctype html>
 </body>
 </html>"""
 
-# --- Routes ---
+# =========================
+# FastAPI App
+# =========================
+app = FastAPI()
+
+# Always return JSON on unhandled errors
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    return JSONResponse({"error": "Server error", "error_detail": str(exc)}, status_code=500)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+# =========================
+# Routes
+# =========================
 @app.get("/", response_class=HTMLResponse)
-async def index():
+async def home():
     return HTMLResponse(INDEX_HTML)
 
 @app.post("/api/chat")
-async def chat(request: Request, response: Response):
+async def api_chat(request: Request):
+    if not OPENAI_API_KEY:
+        return JSONResponse({"error": "Missing OPENAI_API_KEY"}, status_code=500)
+
     data = await request.json()
-    msg = data.get("message", "")
+    user_message = (data.get("message") or "").strip()
+    if not user_message:
+        return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        session_id = str(uuid.uuid4())
+    # Session
+    session_id = request.cookies.get("session_id") or str(uuid.uuid4())
 
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?, ?, ?, ?)",
-                  (session_id, "user", msg, time.time()))
-        conn.commit()
-        c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY ts DESC LIMIT 20", (session_id,))
-        history = [{"role": r, "content": c_} for r, c_ in reversed(c.fetchall())]
+    # Save user message
+    save_message(session_id, "user", user_message)
 
+    # Build context (system + last 20 messages)
+    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    history.extend(get_recent_messages(session_id, limit=20))
+
+    # Call OpenAI
     try:
-        res = openai.ChatCompletion.create(
+        resp = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=history
+            messages=history,
+            temperature=0.7,
         )
-        reply = res.choices[0].message["content"]
+        reply = resp.choices[0].message.content
     except Exception as e:
-        return JSONResponse({"error": "OpenAI API error", "error_detail": str(e)})
+        return JSONResponse({"error": "OpenAI error", "error_detail": str(e)}, status_code=502)
 
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?, ?, ?, ?)",
-                  (session_id, "bot", reply, time.time()))
-        conn.commit()
+    # Save bot reply
+    save_message(session_id, "assistant", reply)
 
-    resp = JSONResponse({"reply": reply})
-    resp.set_cookie("session_id", session_id, httponly=True)
-    return resp
+    # Return reply and ensure cookie is set
+    out = JSONResponse({"reply": reply})
+    out.set_cookie("session_id", session_id, httponly=True, samesite="Lax", max_age=60*60*24*90)
+    return out
 
 @app.post("/api/new")
-async def new_chat(request: Request, response: Response):
-    session_id = request.cookies.get("session_id")
-    if session_id:
-        with sqlite3.connect(DB_FILE) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.commit()
+async def api_new(request: Request):
+    old_session = request.cookies.get("session_id")
+    if old_session:
+        delete_session(old_session)
+    new_session = str(uuid.uuid4())
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("session_id", str(uuid.uuid4()), httponly=True)
+    resp.set_cookie("session_id", new_session, httponly=True, samesite="Lax", max_age=60*60*24*90)
     return resp
 
 @app.get("/api/export")
-async def export_chat(request: Request, fmt: str = "txt"):
+async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
     session_id = request.cookies.get("session_id")
     if not session_id:
-        return PlainTextResponse("No session", status_code=400)
+        return JSONResponse({"error": "No session"}, status_code=400)
 
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT role, content, ts, archived FROM messages WHERE session_id = ? ORDER BY ts", (session_id,))
-        msgs = c.fetchall()
+    msgs = get_all_messages(session_id)
+    now = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
 
-    now = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-    if fmt == "csv":
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["time_utc", "role", "content", "archived"])
-        for role, content, ts, archived in msgs:
-            t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
-            writer.writerow([t, role, content, archived])
-        return PlainTextResponse(output.getvalue(), headers={
-            "Content-Disposition": f'attachment; filename="kindfriend_{now}.csv"',
-            "Content-Type": "text/csv; charset=utf-8",
-        })
-    else:
+    if fmt == "txt":
         lines = []
         for role, content, ts, archived in msgs:
             t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
-            lines.append(f"[{t}] {role}: {content}")
-        return PlainTextResponse("\n".join(lines), headers={
-            "Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"',
-            "Content-Type": "text/plain; charset=utf-8",
-        })
+            who = "User" if role == "user" else ("Assistant" if role == "assistant" else role)
+            tag = " (archived)" if archived else ""
+            lines.append(f"[{t}] {who}{tag}: {content}")
+        text = "\n".join(lines) + "\n"
+        return PlainTextResponse(
+            text,
+            headers={"Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"'}
+        )
+
+    # CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["time_utc", "role", "content", "archived"])
+    for role, content, ts, archived in msgs:
+        t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
+        writer.writerow([t, role, content, archived])
+    csv_data = output.getvalue()
+    return PlainTextResponse(
+        csv_data,
+        headers={
+            "Content-Disposition": f'attachment; filename="kindfriend_{now}.csv'",
+            "Content-Type": "text/csv; charset=utf-8",
+        }
+    )
 
