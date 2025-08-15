@@ -6,6 +6,7 @@ import io
 import csv
 import datetime
 import sqlite3
+from zoneinfo import ZoneInfo  # NEW: timezone support
 
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -119,7 +120,7 @@ INDEX_HTML = """<!doctype html>
   <circle cx="32" cy="32" r="30" fill="url(%23g)" />
   <text x="32" y="38" font-size="24" font-family="Arial Rounded MT Bold, Helvetica, sans-serif" text-anchor="middle" fill="white">KF</text>
   <path d="M22 44 q10 8 20 0" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>
-</svg>?v=6'>
+</svg>?v=7'>
 
   <style>
     :root {
@@ -320,7 +321,6 @@ async def home():
 
 @app.get("/health")
 async def health():
-    # Basic health info: DB path and API availability (no secrets)
     db_exists = os.path.exists(DB_FILE)
     return JSONResponse({
         "ok": True,
@@ -342,7 +342,21 @@ async def api_chat(request: Request):
     session_id = request.cookies.get("session_id") or str(uuid.uuid4())
     save_message(session_id, "user", user_message)
 
-    history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # ---- Live date/time context (Europe/London by default; override with APP_TZ) ----
+    tz_name = os.getenv("APP_TZ", "Europe/London")
+    now_local = datetime.datetime.now(ZoneInfo(tz_name))
+    date_str = now_local.strftime("%A %d %B %Y")
+    time_str = now_local.strftime("%H:%M")
+    time_note = (
+        f"Today is {date_str} and the local time is {time_str} in {tz_name}. "
+        f"Answer date/time questions using this."
+    )
+    # ---------------------------------------------------------------------------------
+
+    history = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": time_note},
+    ]
     history.extend(get_recent_messages(session_id, limit=20))
 
     try:
