@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import uuid
 import io
@@ -9,24 +10,36 @@ import sqlite3
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
 
 # =========================
 # Config & Persistent Paths
 # =========================
-DATA_DIR = os.getenv("DATA_DIR", "")
+DATA_DIR = os.getenv("DATA_DIR", "")  # e.g. /opt/data on Render
 DB_FILE = os.path.join(DATA_DIR, "kindfriend.db") if DATA_DIR else "kindfriend.db"
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+
+# Graceful API key check (don’t crash container if missing)
+if not OPENAI_API_KEY:
+    print("❌ OPENAI_API_KEY not set. Set it in Render → Environment.", file=sys.stderr)
+    API_AVAILABLE = False
+    client = None
+else:
+    API_AVAILABLE = True
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        print(f"❌ Failed to init OpenAI client: {e}", file=sys.stderr)
+        API_AVAILABLE = False
+        client = None
 
 SYSTEM_PROMPT = (
     "You are KindFriend: a warm, respectful companion. You are not a therapist. "
     "If the user mentions self-harm or immediate danger, kindly suggest contacting UK Samaritans (116 123), "
     "NHS 111, or emergency services (999). Be concise and kind."
 )
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =========================
 # Database (SQLite)
@@ -106,34 +119,23 @@ INDEX_HTML = """<!doctype html>
   <circle cx="32" cy="32" r="30" fill="url(%23g)" />
   <text x="32" y="38" font-size="24" font-family="Arial Rounded MT Bold, Helvetica, sans-serif" text-anchor="middle" fill="white">KF</text>
   <path d="M22 44 q10 8 20 0" stroke="white" stroke-width="2" fill="none" stroke-linecap="round"/>
-</svg>?v=4'>
+</svg>?v=6'>
 
   <style>
     :root {
-      --bg: #0b1020;
-      --bg2: #0f152c;
-      --card: rgba(255,255,255,0.08);
-      --border: rgba(255,255,255,0.10);
-      --text: #e7eaf3;
-      --muted: #a7b0c4;
-      --brand: #7c9cff;
-      --brand-2: #5fe1d9;
-      --user: #4456ff;
-      --bot: #16c79a;
-      --shadow: 0 10px 25px rgba(0,0,0,0.25);
-      --radius: 16px;
+      --bg: #0b1020; --bg2: #0f152c;
+      --card: rgba(255,255,255,0.08); --border: rgba(255,255,255,0.10);
+      --text: #e7eaf3; --muted: #a7b0c4;
+      --brand: #7c9cff; --brand-2: #5fe1d9;
+      --user: #4456ff; --bot: #16c79a;
+      --shadow: 0 10px 25px rgba(0,0,0,0.25); --radius: 16px;
     }
     [data-theme="light"] {
-      --bg: #eef2ff;
-      --bg2: #e8ecff;
-      --card: rgba(255,255,255,0.9);
-      --border: rgba(0,10,40,0.1);
-      --text: #0b1020;
-      --muted: #3d4966;
-      --brand: #2b4cff;
-      --brand-2: #05bdb0;
-      --user: #2b4cff;
-      --bot: #059669;
+      --bg: #eef2ff; --bg2: #e8ecff;
+      --card: rgba(255,255,255,0.9); --border: rgba(0,10,40,0.1);
+      --text: #0b1020; --muted: #3d4966;
+      --brand: #2b4cff; --brand-2: #05bdb0;
+      --user: #2b4cff; --bot: #059669;
       --shadow: 0 10px 25px rgba(0,0,0,0.08);
     }
     * { box-sizing: border-box; }
@@ -145,9 +147,7 @@ INDEX_HTML = """<!doctype html>
         radial-gradient(1200px 600px at 110% 120%, #133 0%, transparent 60%),
         linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
       font: 16px/1.5 system-ui, sans-serif;
-      display: grid;
-      place-items: center;
-      padding: 24px;
+      display: grid; place-items: center; padding: 24px;
     }
     .app { width: min(900px, 100%); display: grid; grid-template-rows: auto 1fr auto; gap: 16px; }
     .card { background: var(--card); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -318,10 +318,21 @@ app.add_middleware(
 async def home():
     return HTMLResponse(INDEX_HTML)
 
+@app.get("/health")
+async def health():
+    # Basic health info: DB path and API availability (no secrets)
+    db_exists = os.path.exists(DB_FILE)
+    return JSONResponse({
+        "ok": True,
+        "api_available": API_AVAILABLE,
+        "db_path": DB_FILE,
+        "db_exists": db_exists,
+    })
+
 @app.post("/api/chat")
 async def api_chat(request: Request):
-    if not OPENAI_API_KEY:
-        return JSONResponse({"error": "Missing OPENAI_API_KEY"}, status_code=500)
+    if not API_AVAILABLE:
+        return JSONResponse({"error": "Service is not configured with an API key."}, status_code=500)
 
     data = await request.json()
     user_message = (data.get("message") or "").strip()
@@ -359,6 +370,7 @@ async def api_new(request: Request):
     resp = JSONResponse({"ok": True})
     resp.set_cookie("session_id", new_session, httponly=True, samesite="Lax", max_age=60*60*24*90)
     return resp
+
 @app.get("/api/export")
 async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
     session_id = request.cookies.get("session_id")
@@ -384,39 +396,6 @@ async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|cs
             },
         )
 
-    # CSV export
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["time_utc", "role", "content", "archived"])
-    for role, content, ts, archived in msgs:
-        t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
-        writer.writerow([t, role, content, archived])
-    csv_data = output.getvalue()
-    return PlainTextResponse(
-        csv_data,
-        headers={
-            "Content-Disposition": f"attachment; filename=kindfriend_{now}.csv",
-            "Content-Type": "text/csv; charset=utf-8",
-        },
-    )
-
-
-    # CSV export
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["time_utc", "role", "content", "archived"])
-    for role, content, ts, archived in msgs:
-        t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
-        writer.writerow([t, role, content, archived])
-    csv_data = output.getvalue()
-    return PlainTextResponse(
-        csv_data,
-        headers={
-            "Content-Disposition": f'attachment; filename="kindfriend_{now}.csv"',
-            "Content-Type": "text/csv; charset=utf-8",
-        },
-    )
-
     # CSV
     output = io.StringIO()
     writer = csv.writer(output)
@@ -432,5 +411,4 @@ async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|cs
             "Content-Type": "text/csv; charset=utf-8",
         },
     )
-
 
