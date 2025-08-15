@@ -359,7 +359,6 @@ async def api_new(request: Request):
     resp = JSONResponse({"ok": True})
     resp.set_cookie("session_id", new_session, httponly=True, samesite="Lax", max_age=60*60*24*90)
     return resp
-
 @app.get("/api/export")
 async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
     session_id = request.cookies.get("session_id")
@@ -380,10 +379,27 @@ async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|cs
         return PlainTextResponse(
             text,
             headers={
-                "Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"',
+                "Content-Disposition": f"attachment; filename=kindfriend_{now}.txt",
                 "Content-Type": "text/plain; charset=utf-8",
             },
         )
+
+    # CSV export
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["time_utc", "role", "content", "archived"])
+    for role, content, ts, archived in msgs:
+        t = datetime.datetime.utcfromtimestamp(ts).isoformat() + "Z"
+        writer.writerow([t, role, content, archived])
+    csv_data = output.getvalue()
+    return PlainTextResponse(
+        csv_data,
+        headers={
+            "Content-Disposition": f"attachment; filename=kindfriend_{now}.csv",
+            "Content-Type": "text/csv; charset=utf-8",
+        },
+    )
+
 
     # CSV export
     output = io.StringIO()
