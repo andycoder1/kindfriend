@@ -12,22 +12,35 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-# Auth deps
-import bcrypt
+# ---- Password hashing (bcrypt if available; fallback to hashlib for dev) ----
+try:
+    import bcrypt
+    def hash_password(password: str) -> str:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    def check_password(password: str, hashed: str) -> bool:
+        return bcrypt.checkpw(password.encode(), hashed.encode())
+except ImportError:
+    import hashlib
+    print("⚠ bcrypt not found — using SHA256 fallback (dev only). Install bcrypt for production.", file=sys.stderr)
+    def hash_password(password: str) -> str:
+        return hashlib.sha256(password.encode()).hexdigest()
+    def check_password(password: str, hashed: str) -> bool:
+        return hashlib.sha256(password.encode()).hexdigest() == hashed
+
 from itsdangerous import URLSafeSerializer, BadSignature
 
 # =========================
 # Config & Persistent Paths
 # =========================
-DATA_DIR = os.getenv("DATA_DIR", "")  # e.g. /opt/data on Render (set in Environment)
+DATA_DIR = os.getenv("DATA_DIR", "")  # e.g. /opt/data on Render
 DB_FILE = os.path.join(DATA_DIR, "kindfriend.db") if DATA_DIR else "kindfriend.db"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")  # set in Environment for production
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")  # set in production
 AUTH_COOKIE = "kf_auth"
 
-# Graceful API key check (don’t crash if missing)
+# Graceful API key check (don’t crash container if missing)
 if not OPENAI_API_KEY:
     print("❌ OPENAI_API_KEY not set. Set it in Render → Environment.", file=sys.stderr)
     API_AVAILABLE = False
@@ -80,7 +93,7 @@ def init_db():
                 created_at    REAL NOT NULL
             )
         """)
-        # add user_id if missing (for older DBs)
+        # add user_id if missing (migrate older DBs)
         try:
             cur.execute("SELECT user_id FROM messages LIMIT 1")
         except sqlite3.OperationalError:
@@ -124,7 +137,7 @@ def delete_session(session_id: str):
 
 def create_user(username: str, password: str):
     uid = str(uuid.uuid4())
-    pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    pw_hash = hash_password(password)
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -475,8 +488,7 @@ INDEX_HTML = """<!doctype html>
       await refreshMe(); addBubble('Signed in.', 'bot');
     }
     async function doLogout() {
-      await fetch('/api/logout', {method:'POST'});
-      await refreshMe(); addBubble('Signed out.', 'bot');
+      await fetch('/api/logout', {method:'POST'}); await refreshMe(); addBubble('Signed out.', 'bot');
     }
 
     function openModal() { profileModal.classList.add('on'); modalBackdrop.classList.add('on'); }
@@ -487,11 +499,11 @@ INDEX_HTML = """<!doctype html>
     logoutBtn.addEventListener('click', doLogout);
     editProfileBtn.addEventListener('click', () => { openModal(); });
 
-    closeModalBtn.addEventListener('click', closeModal);
-    cancelProfile.addEventListener('click', closeModal);
+    document.getElementById('close-modal').addEventListener('click', closeModal);
+    document.getElementById('cancel-profile').addEventListener('click', closeModal);
     modalBackdrop.addEventListener('click', closeModal);
 
-    saveProfile.addEventListener('click', async () => {
+    document.getElementById('save-profile').addEventListener('click', async () => {
       const display_name = displayNameEl.value.trim();
       const bio = bioEl.value.trim();
       try {
@@ -531,7 +543,7 @@ INDEX_HTML = """<!doctype html>
           addBubble('Server error: ' + (await res.text()), 'bot');
         }
       } catch (err) {
-        addBubble('Network error: ' + err.message', 'bot');
+        addBubble('Network error: ' + err.message, 'bot');
       } finally {
         setTyping(false);
       }
@@ -609,7 +621,7 @@ async def api_login(request: Request):
     user = get_user_by_username(username)
     if not user:
         return JSONResponse({"error": "Invalid credentials"}, status_code=401)
-    if not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+    if not check_password(password, user["password_hash"]):
         return JSONResponse({"error": "Invalid credentials"}, status_code=401)
     resp = JSONResponse({"ok": True})
     set_auth_cookie(resp, user["id"])
