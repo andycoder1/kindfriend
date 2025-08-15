@@ -15,8 +15,6 @@ import openai
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 MODEL_NAME = "gpt-4o-mini"  # change if you prefer another available model
 
-DB_FILE = "kindfriend.db"
-
 # --- DB init ---
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
