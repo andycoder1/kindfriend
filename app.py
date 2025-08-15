@@ -49,7 +49,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")  # set in productio
 AUTH_COOKIE = "kf_auth"
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")  # You added this ✔
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "")  # your price id here via env
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 BILLING_RETURN_URL = os.getenv("BILLING_RETURN_URL", "")  # e.g. https://kindfriend.onrender.com
 
@@ -316,21 +316,21 @@ def current_time_note():
     return f"Today is {date_str} and the local time is {time_str} in {tz_name}. Answer date/time questions using this."
 
 # =========================
-# Frontend (single file UI)
+# Frontend (single file UI with Auth Modal)
 # =========================
-# Use placeholders for donation strings to avoid f-string issues.
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kind Friend</title>
+  <!-- WhatsApp-style favicon (green KF) -->
   <link rel="icon" href='data:image/svg+xml;utf8,
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="%237d7bff"/>
-      <stop offset="100%" stop-color="%235fe1d9"/>
+      <stop offset="0%" stop-color="%23075E54"/>
+      <stop offset="100%" stop-color="%2325D366"/>
     </linearGradient>
   </defs>
   <circle cx="32" cy="32" r="30" fill="url(%23g)" />
@@ -338,139 +338,277 @@ INDEX_HTML = """<!doctype html>
 </svg>'/>
 
   <style>
+    /* ==== Theme (inspired by WhatsApp, not identical) ==== */
     :root {
-      --bg: #0b1020; --bg-accent: #101735; --bg-2: #0e142c;
-      --text: #e8ecf7; --muted: #a9b0c5;
-      --card: rgba(255,255,255,0.08); --card-2: rgba(255,255,255,0.06);
-      --border: rgba(255,255,255,0.12);
-      --brand: #7d7bff; --brand-2: #5fe1d9;
-      --shadow: 0 12px 40px rgba(0,0,0,0.28);
-      --radius: 16px; --gutter: 16px; --sidebar: 300px;
+      --wa-green-dark: #075E54;
+      --wa-green: #128C7E;
+      --wa-accent: #25D366;
+      --wa-bg: #0a0f14;
+      --wa-chat-bg: #0e141a;
+      --wa-bubble-me: #005c4b;          /* my (user) bubble */
+      --wa-bubble-you: #202c33;        /* bot bubble */
+      --wa-text: #e9edef;
+      --wa-muted: #8696a0;
+      --wa-border: #1f2c33;
+      --radius: 16px;
+      --shadow: 0 6px 24px rgba(0,0,0,.35);
+      --panel: #111a20;
+      --panel-2: #0b1217;
     }
-    [data-theme="light"] {
-      --bg: #f3f6ff; --bg-accent: #eaf0ff; --bg-2: #ffffff;
-      --text: #0b1020; --muted: #465170;
-      --card: rgba(255,255,255,0.9); --card-2: rgba(255,255,255,0.85);
-      --border: rgba(0,15,40,0.12);
-      --shadow: 0 12px 40px rgba(0,0,0,0.12);
+    [data-theme="light"]{
+      --wa-bg: #f0f2f5;
+      --wa-chat-bg: #e7f0ea;
+      --wa-bubble-me: #d9fdd3;
+      --wa-bubble-you: #ffffff;
+      --wa-text: #111b21;
+      --wa-muted: #54656f;
+      --wa-border: #d1d7db;
+      --panel: #ffffff;
+      --panel-2: #ffffff;
+      --shadow: 0 6px 24px rgba(0,0,0,.12);
     }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; margin: 0; }
-    body { min-height: 100svh; color: var(--text); font: 15px/1.5 Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      background:
-        radial-gradient(1200px 600px at -10% -20%, #22264a 0%, transparent 60%),
-        radial-gradient(1200px 600px at 110% 120%, #113a3a 0%, transparent 60%),
-        linear-gradient(180deg, var(--bg) 0%, var(--bg-accent) 100%); }
-    .shell { display: grid; grid-template-columns: var(--sidebar) 1fr; gap: var(--gutter); padding: var(--gutter); min-height: 100svh; }
-    .card { background: var(--card); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 
-    /* Sidebar */
-    .sidebar { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-    .logo { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center;
-            background: linear-gradient(135deg, var(--brand), var(--brand-2)); color: white; font-weight: 800; }
-    .s-row { display:flex; align-items:center; gap:8px; }
-    .title { margin: 0; font-size: 18px; font-weight: 800; }
-    .donate { font-size: 12px; color: var(--muted); }
-    .donate a { color: var(--brand-2); text-decoration:none; border-bottom:1px dashed var(--brand-2); }
-    .sessions { overflow:auto; display:flex; flex-direction:column; gap:6px; padding-right:4px; }
-    .session { padding:8px 10px; border:1px solid var(--border); border-radius:12px; cursor:pointer; background:var(--card-2); }
-    .session.active { outline:2px solid var(--brand-2); }
-    .s-actions { display:flex; gap:6px; }
-    .btn { border: 1px solid var(--border); background: var(--card-2); color: var(--text); padding:8px 10px; border-radius:999px; cursor:pointer; }
-    .btn.primary { background: linear-gradient(135deg, var(--brand), var(--brand-2)); color:white; border-color:transparent; }
-    .btn.note { border-style:dashed; opacity:.9; }
-    .chip { font-size: 12px; color: var(--muted); padding: 6px 10px; border-radius: 999px; border: 1px dashed var(--border); }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0}
+    body{
+      color:var(--wa-text);
+      font:15px/1.45 Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: var(--wa-bg);
+    }
 
-    /* Main */
-    .main { display:flex; flex-direction:column; gap: var(--gutter); }
-    .header { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:12px 16px; }
-    .toolbar { margin-left:auto; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-    .auth input { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: rgba(255,255,255,0.05); color: var(--text); min-width: 120px; }
-    #logout, #edit-profile { display:none; }
+    /* Layout: left column chat list, right column conversation */
+    .app{
+      display:grid;
+      grid-template-columns: 380px 1fr;
+      height:100svh;
+      overflow:hidden;
+    }
+    @media (max-width: 1000px){ .app{ grid-template-columns: 1fr; } .sidebar{ display:none; } }
 
-    .chat-card { display:flex; flex-direction:column; min-height:0; height: calc(100svh - 200px); }
-    .chat { flex:1 1 auto; min-height:0; overflow:auto; padding:16px; display:grid; gap:12px; border-top-left-radius: var(--radius); border-top-right-radius: var(--radius);
-      background: radial-gradient(800px 400px at 20% 0%, rgba(125,123,255,0.10) 0%, transparent 60%), radial-gradient(800px 400px at 80% 100%, rgba(95,225,217,0.10) 0%, transparent 60%); }
-    .row { display:grid; grid-template-columns:auto 1fr; gap:10px; align-items:start; }
-    .row.user { grid-template-columns:1fr auto; }
-    .avatar { width:36px; height:36px; border-radius:50%; display:grid; place-items:center; color:white; font-weight:800;
-      background: linear-gradient(135deg, var(--brand), var(--brand-2)); }
-    .row.user .avatar { display:none; }
-    .bubble { max-width:80ch; padding:12px 14px; border-radius:14px; border:1px solid var(--border); background:rgba(255,255,255,0.06); word-wrap:anywhere; }
-    .row.user .bubble { background:rgba(125,123,255,0.14); }
-    .row.bot .bubble { background:rgba(95,225,217,0.14); }
-    body.large .bubble { font-size: 18px; line-height: 1.7; }
+    /* Header bar */
+    .topbar{
+      height:60px;
+      display:flex; align-items:center; gap:10px;
+      padding:0 16px;
+      background: linear-gradient(0deg, var(--wa-green-dark), var(--wa-green));
+      color:#fff;
+      box-shadow:var(--shadow);
+    }
+    .logo{ width:36px;height:36px;border-radius:10px;background:var(--wa-accent);display:grid;place-items:center;color:#073; font-weight:800; }
+    .brand{ font-weight:800; letter-spacing:.2px; }
+    .grow{ flex:1 1 auto; }
 
-    .composer { display:grid; grid-template-columns: 1fr auto; gap:10px; padding:12px; border-top:1px solid var(--border); background:var(--card-2);
-      border-bottom-left-radius:var(--radius); border-bottom-right-radius:var(--radius); }
-    .input { padding:14px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,0.06); color:var(--text); }
+    .chip{ font-size:12px; color:#eafff0; background:rgba(255,255,255,.15); padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.25) }
+    #trial-chip{ display:none; }
 
-    .hint { text-align:center; color:var(--muted); font-size:12px; }
+    .tb-btn{ background:rgba(255,255,255,.15); color:#fff; border:1px solid rgba(255,255,255,.2); padding:8px 10px; border-radius:999px; cursor:pointer; }
+    .tb-btn.primary{ background:#fff; color:#073; }
 
-    /* Modal */
+    /* Columns */
+    .sidebar{
+      display:flex; flex-direction:column; height:calc(100svh - 60px);
+      border-right:1px solid var(--wa-border);
+      background:var(--panel);
+    }
+    .side-head{ display:flex; gap:8px; align-items:center; padding:12px; border-bottom:1px solid var(--wa-border); }
+    .side-actions{ display:flex; gap:8px; padding:12px; }
+    .list{ overflow:auto; padding:8px 12px; display:flex; flex-direction:column; gap:8px; }
+    .item{ padding:10px 12px; background:var(--panel-2); border:1px solid var(--wa-border); border-radius:12px; cursor:pointer; }
+    .item.active{ outline:2px solid var(--wa-accent); }
+
+    .main{
+      display:flex; flex-direction:column; height:calc(100svh - 60px);
+      background:var(--wa-chat-bg);
+      position:relative;
+    }
+
+    /* Chat header under top bar (shows auth/actions) */
+    .chatbar{
+      display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+      border-bottom:1px solid var(--wa-border);
+      background:var(--panel);
+      padding:10px 12px;
+    }
+    .auth .tb-btn{ background:var(--wa-green); border-color:transparent; }
+    .auth .tb-btn.text{ background:transparent; border-color:var(--wa-border); color:var(--wa-text); }
+
+    /* Background pattern (subtle) */
+    .bg{
+      position:absolute; inset:0; pointer-events:none; opacity:.05;
+      background-image:
+        radial-gradient(circle at 15% 10%, #fff 1px, transparent 1px),
+        radial-gradient(circle at 80% 30%, #fff 1px, transparent 1px),
+        radial-gradient(circle at 40% 70%, #fff 1px, transparent 1px),
+        radial-gradient(circle at 60% 90%, #fff 1px, transparent 1px);
+      background-size: 240px 240px, 220px 220px, 260px 260px, 200px 200px;
+    }
+
+    /* Chat pane */
+    .chat{ flex:1 1 auto; min-height:0; overflow:auto; padding:18px 16px; display:grid; gap:8px; }
+    .row{ display:grid; grid-template-columns: auto 1fr; gap:8px; align-items:end; }
+    .row.user{ grid-template-columns: 1fr auto; }
+    .row.user .avatar{ display:none; }
+    .avatar{ width:28px;height:28px;border-radius:50%; display:grid; place-items:center; color:#fff; background:var(--wa-green); font-weight:800; }
+    .bubble{
+      max-width: 70ch;
+      padding:10px 12px;
+      border-radius: 16px;
+      color: var(--wa-text);
+      position:relative;
+      white-space: pre-wrap; /* preserve spacing */
+      word-wrap:anywhere;
+      box-shadow: 0 1px 0 rgba(0,0,0,.08);
+      border: 1px solid var(--wa-border);
+    }
+    .row.user .bubble{ background: var(--wa-bubble-me); color:#eafff0; }
+    .row.bot  .bubble{ background: var(--wa-bubble-you); }
+
+    /* Bubble tails */
+    .row.user .bubble::after{
+      content:""; position:absolute; right:-6px; bottom:0;
+      width:12px; height:12px; background:var(--wa-bubble-me);
+      clip-path: polygon(0 0, 100% 100%, 0 100%);
+      border-right:1px solid var(--wa-border); border-bottom:1px solid var(--wa-border);
+    }
+    .row.bot .bubble::before{
+      content:""; position:absolute; left:-6px; bottom:0;
+      width:12px; height:12px; background:var(--wa-bubble-you);
+      clip-path: polygon(0 100%, 100% 0, 100% 100%);
+      border-left:1px solid var(--wa-border); border-bottom:1px solid var(--wa-border);
+    }
+
+    .meta{ display:flex; gap:8px; align-items:center; color:var(--wa-muted); font-size:11px; margin-top:4px; }
+
+    /* Composer */
+    .composer{
+      display:grid; grid-template-columns: 1fr auto; gap:8px;
+      padding:10px; border-top:1px solid var(--wa-border);
+      background:var(--panel);
+    }
+    .input{
+      padding:12px 14px; border-radius:999px; border:1px solid var(--wa-border);
+      background: var(--panel-2); color:var(--wa-text);
+    }
+    .send{ background:var(--wa-green); color:#fff; border:none; padding:10px 16px; border-radius:999px; cursor:pointer; }
+
+    /* Modals (reuse your existing structure) */
     .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:40; }
     .modal { display:none; position:fixed; inset:0; z-index:50; place-items:center; }
     .modal.on, .modal-backdrop.on { display:grid; }
-    .modal-card { width:min(520px, 94vw); background:var(--bg-2); color:var(--text); border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow); padding:16px; }
+    .modal-card { width:min(520px, 94vw); background:var(--panel); color:var(--wa-text); border:1px solid var(--wa-border); border-radius:18px; box-shadow:var(--shadow); padding:16px; }
     .modal-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
     .modal-title { font-weight:800; font-size:16px; }
-    .xbtn { border:1px solid var(--border); background:var(--card-2); color:var(--text); border-radius:10px; padding:6px 10px; cursor:pointer; }
+    .xbtn { border:1px solid var(--wa-border); background:var(--panel-2); color:var(--wa-text); border-radius:10px; padding:6px 10px; cursor:pointer; }
     .form-row { display:grid; gap:6px; margin:10px 0; }
-    .form-row input, .form-row textarea { padding:10px 12px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,0.06); color:var(--text); }
+    .form-row input, .form-row textarea { padding:10px 12px; border-radius:12px; border:1px solid var(--wa-border); background:var(--panel-2); color:var(--wa-text); }
 
-    @media (max-width: 900px) {
-      .shell { grid-template-columns: 1fr; }
-      .sidebar { order:2; }
-      .main { order:1; }
-      .chat-card { height: calc(100svh - 260px); }
-    }
+    /* Utilities */
+    .row .bubble p{ margin:0 0 6px 0; }
+    .row .bubble p:last-child{ margin:0; }
+    .link{ color:var(--wa-accent); }
+    .space{ height:8px; }
+    .right{ margin-left:auto; }
+    body.large .bubble{ font-size:17px; line-height:1.6; }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <!-- Sidebar -->
-    <aside class="card sidebar">
-      <div class="s-row"><div class="logo">KF</div><h1 class="title" style="margin-left:6px;">Kind Friend</h1></div>
-      <div class="donate">💚 <strong>50% donated</strong> to <a href="https://www.samaritans.org/" target="_blank" rel="noopener">Samaritans</a>.</div>
-      <div class="s-actions">
-        <button id="new-chat" class="btn primary">New chat</button>
-        <button id="large" class="btn">A A</button>
+  <!-- Global top bar -->
+  <div class="topbar">
+    <div class="logo">KF</div>
+    <div class="brand">Kind Friend</div>
+    <div class="grow"></div>
+    <span class="chip" id="me">Not signed in</span>
+    <span class="chip" id="trial-chip"></span>
+    <button id="theme" class="tb-btn">Theme</button>
+    <button id="download-txt" class="tb-btn">.txt</button>
+    <button id="download-csv" class="tb-btn">.csv</button>
+  </div>
+
+  <div class="app">
+    <!-- Sidebar: chat list / actions -->
+    <aside class="sidebar">
+      <div class="side-head">
+        <div style="font-weight:700;">Chats</div>
       </div>
-      <div class="sessions" id="sessions"></div>
+      <div class="side-actions">
+        <button id="new-chat" class="tb-btn primary">New chat</button>
+        <button id="large" class="tb-btn">A A</button>
+      </div>
+      <div class="list" id="sessions"></div>
     </aside>
 
-    <!-- Main -->
+    <!-- Main conversation column -->
     <main class="main">
-      <div class="card header">
-        <span class="chip" id="me">Not signed in</span>
-        <div class="auth" id="auth">
-          <input id="u" placeholder="username" />
-          <input id="p" placeholder="password" type="password" />
-          <button id="signup" class="btn">Sign up</button>
-          <button id="login"  class="btn primary">Log in</button>
-          <button id="logout" class="btn">Log out</button>
-          <button id="edit-profile" class="btn">Profile</button>
-          <button id="upgrade" class="btn primary">Upgrade</button>
-          <button id="billing" class="btn">Billing</button>
-          <button id="donation-note" class="btn note" title="We donate half of all fees">50% to Samaritans</button>
-        </div>
-        <div class="toolbar">
-          <button id="theme" class="btn">Theme</button>
-          <button id="download-txt" class="btn">.txt</button>
-          <button id="download-csv" class="btn">.csv</button>
+      <div class="bg"></div>
+      <div class="chatbar">
+        <div class="auth" id="auth" style="display:flex;gap:8px;align-items:center;">
+          <button id="open-auth" class="tb-btn primary">Sign in / up</button>
+          <button id="logout" class="tb-btn text" style="display:none;">Log out</button>
+          <button id="edit-profile" class="tb-btn text" style="display:none;">Profile</button>
+          <button id="upgrade" class="tb-btn primary" style="display:none;">Upgrade</button>
+          <button id="billing" class="tb-btn text" style="display:none;">Billing</button>
+          <button id="donation-note" class="tb-btn text" title="We donate half of all fees">50% to Samaritans</button>
         </div>
       </div>
 
-      <section class="card chat-card">
-        <div class="chat" id="chat"></div>
-        <div class="composer">
-          <input id="message" class="input" autocomplete="off" placeholder="Share what's on your mind…" />
-          <button id="send" class="btn primary">Send</button>
-        </div>
-      </section>
+      <section class="chat" id="chat"></section>
 
-      <div class="hint">Kind Friend is a supportive companion, not a therapist. In crisis, call 999 or Samaritans 116 123 (UK).</div>
+      <div class="composer">
+        <input id="message" class="input" autocomplete="off" placeholder="Type a message" />
+        <button id="send" class="send">Send</button>
+      </div>
     </main>
+  </div>
+
+  <!-- Auth Modal -->
+  <div class="modal-backdrop" id="auth-backdrop"></div>
+  <div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title" id="auth-title">Welcome to Kind Friend</div>
+        <button class="xbtn" id="auth-close">Close</button>
+      </div>
+
+      <div class="tabs" style="display:flex;gap:8px;margin-bottom:8px;">
+        <button id="tab-login"  class="tb-btn" aria-selected="true">Log in</button>
+        <button id="tab-signup" class="tb-btn">Sign up</button>
+      </div>
+
+      <div id="pane-login">
+        <div class="form-row">
+          <label for="login-username">Username</label>
+          <input id="login-username" placeholder="yourname" />
+        </div>
+        <div class="form-row">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" placeholder="••••••••" />
+        </div>
+        <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
+          <button class="xbtn" id="login-cancel">Cancel</button>
+          <button class="tb-btn primary" id="login-submit">Log in</button>
+        </div>
+      </div>
+
+      <div id="pane-signup" style="display:none;">
+        <div class="form-row">
+          <label for="signup-username">Username</label>
+          <input id="signup-username" placeholder="yourname" />
+        </div>
+        <div class="form-row">
+          <label for="signup-password">Password</label>
+          <input id="signup-password" type="password" placeholder="Create a password" />
+        </div>
+        <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
+          <button class="xbtn" id="signup-cancel">Cancel</button>
+          <button class="tb-btn primary" id="signup-submit">Create account</button>
+        </div>
+      </div>
+
+      <div class="donate" style="margin-top:10px;color:var(--wa-muted);">
+        💚 <strong>50% donated</strong> to
+        <a class="link" href="https://www.samaritans.org/" target="_blank" rel="noopener">Samaritans</a>.
+      </div>
+    </div>
   </div>
 
   <!-- Profile Modal -->
@@ -490,8 +628,8 @@ INDEX_HTML = """<!doctype html>
         <textarea id="bio" rows="4" placeholder="Anything you'd like KF to remember about you (non-sensitive)."></textarea>
       </div>
       <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
-        <button class="btn" id="cancel-profile">Cancel</button>
-        <button class="btn primary" id="save-profile">Save</button>
+        <button class="xbtn" id="cancel-profile">Cancel</button>
+        <button class="tb-btn primary" id="save-profile">Save</button>
       </div>
     </div>
   </div>
@@ -503,12 +641,14 @@ INDEX_HTML = """<!doctype html>
       const next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
       root.setAttribute('data-theme', next); localStorage.setItem('kf-theme', next);
     });
+
     const chat   = document.getElementById('chat');
     const input  = document.getElementById('message');
     const send   = document.getElementById('send');
     const sessionsEl = document.getElementById('sessions');
     const largeBtn = document.getElementById('large');
     const donationBtn = document.getElementById('donation-note');
+
     donationBtn.addEventListener('click', () => {
       alert('💚 ' + '%%DONATION_NOTE%%' + '\\nLearn more: %%DONATION_LINK%%');
     });
@@ -516,75 +656,135 @@ INDEX_HTML = """<!doctype html>
 
     function md(x){
       const esc=x.replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
-      let out=esc.replace(/(https?:\\/\\/\\S+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>');
+      let out=esc.replace(/(https?:\\/\\/\\S+)/g,'<a class="link" href="$1" target="_blank" rel="noopener">$1</a>');
       out=out.replace(/\\*\\*(.+?)\\*\\*/g,'<strong>$1</strong>').replace(/\\*(.+?)\\*/g,'<em>$1</em>').replace(/`([^`]+?)`/g,'<code>$1</code>');
-      out=out.split(/\\n\\n+/).map(p=>'<p>'+p.replace(/\\n/g,'<br/>')+'</p>').join(''); return out;
+      out=out.split(/\\n\\n+/).map(p=>'<p>'+p.replace(/\\n/g,'<br/>')+'</p>').join('');
+      return out;
     }
 
     function makeBotBubble(){
       const row=document.createElement('div'); row.className='row bot';
       const av=document.createElement('div'); av.className='avatar'; av.textContent='KF';
       const b=document.createElement('div'); b.className='bubble'; b.innerHTML='';
-      row.appendChild(av); row.appendChild(b); chat.appendChild(row); chat.scrollTop=chat.scrollHeight; return b;
+      const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);
+      chat.appendChild(row); chat.scrollTop=chat.scrollHeight; return b;
     }
 
     function addBubble(text, who){
       const row=document.createElement('div'); row.className='row '+who;
       const av=document.createElement('div'); av.className='avatar'; av.textContent=(who==='bot')?'KF':'You';
       const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(text);
-      if(who==='bot') row.appendChild(av); row.appendChild(b);
+      const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      if(who==='bot'){
+        row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);
+      }else{
+        const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);
+      }
       if(who==='user') row.style.gridTemplateColumns='1fr auto';
       chat.appendChild(row); chat.scrollTop=chat.scrollHeight;
     }
 
-    // Auth + profile
-    const meSpan=document.getElementById('me'), u=document.getElementById('u'), p=document.getElementById('p');
-    const signupBtn=document.getElementById('signup'), loginBtn=document.getElementById('login'), logoutBtn=document.getElementById('logout'), editProfileBtn=document.getElementById('edit-profile');
-    const modalBackdrop=document.getElementById('modal-backdrop'), profileModal=document.getElementById('profile-modal');
-    const closeModalBtn=document.getElementById('close-modal'), cancelProfile=document.getElementById('cancel-profile'), saveProfile=document.getElementById('save-profile');
-    const displayNameEl=document.getElementById('display_name'), bioEl=document.getElementById('bio');
-    function openModal(){ profileModal.classList.add('on'); modalBackdrop.classList.add('on'); }
-    function closeModal(){ profileModal.classList.remove('on'); modalBackdrop.classList.remove('on'); }
+    // ========= Auth modal (unchanged API) =========
+    const meSpan = document.getElementById('me');
+    const trialChip = document.getElementById('trial-chip');
+    const logoutBtn = document.getElementById('logout');
+    const editProfileBtn = document.getElementById('edit-profile');
+    const upgradeBtn = document.getElementById('upgrade');
+    const billingBtn = document.getElementById('billing');
+    const openAuthBtn = document.getElementById('open-auth');
+
+    const authModal = document.getElementById('auth-modal');
+    const authBackdrop = document.getElementById('auth-backdrop');
+    const authClose = document.getElementById('auth-close');
+
+    const tabLogin = document.getElementById('tab-login');
+    const tabSignup = document.getElementById('tab-signup');
+    const paneLogin = document.getElementById('pane-login');
+    const paneSignup = document.getElementById('pane-signup');
+
+    const loginUsername = document.getElementById('login-username');
+    const loginPassword = document.getElementById('login-password');
+    const loginSubmit   = document.getElementById('login-submit');
+    const loginCancel   = document.getElementById('login-cancel');
+
+    const signupUsername = document.getElementById('signup-username');
+    const signupPassword = document.getElementById('signup-password');
+    const signupSubmit   = document.getElementById('signup-submit');
+    const signupCancel   = document.getElementById('signup-cancel');
+
+    function openAuth(which='login'){
+      authModal.classList.add('on'); authBackdrop.classList.add('on');
+      if(which==='signup'){ showSignup(); } else { showLogin(); }
+      setTimeout(()=>{ (which==='signup'?signupUsername:loginUsername).focus(); }, 50);
+    }
+    function closeAuth(){ authModal.classList.remove('on'); authBackdrop.classList.remove('on'); }
+
+    function showLogin(){
+      paneLogin.style.display=''; paneSignup.style.display='none';
+      tabLogin.classList.add('primary'); tabSignup.classList.remove('primary');
+      tabLogin.setAttribute('aria-selected','true'); tabSignup.setAttribute('aria-selected','false');
+    }
+    function showSignup(){
+      paneLogin.style.display='none'; paneSignup.style.display='';
+      tabSignup.classList.add('primary'); tabLogin.classList.remove('primary');
+      tabLogin.setAttribute('aria-selected','false'); tabSignup.setAttribute('aria-selected','true');
+    }
+
+    openAuthBtn.onclick = ()=>openAuth('login');
+    authClose.onclick = closeAuth; authBackdrop.onclick = closeAuth;
+    loginCancel.onclick = closeAuth; signupCancel.onclick = closeAuth;
+    tabLogin.onclick = showLogin; tabSignup.onclick = showSignup;
 
     async function refreshMe(){
-      const r=await fetch('/api/me'); const data=await r.json();
+      const r = await fetch('/api/me'); const data = await r.json();
       if(data.user){
-        meSpan.textContent=`Signed in as ${data.user.display_name||data.user.username}`;
-        u.style.display='none'; p.style.display='none'; signupBtn.style.display='none'; loginBtn.style.display='none';
-        logoutBtn.style.display=''; editProfileBtn.style.display='';
-        displayNameEl.value=data.user.display_name||''; bioEl.value=data.user.bio||'';
+        meSpan.textContent = `Signed in as ${data.user.display_name||data.user.username}`;
+        openAuthBtn.style.display='none';
+        logoutBtn.style.display=''; editProfileBtn.style.display=''; upgradeBtn.style.display=''; billingBtn.style.display='';
+        if(data.trial && data.trial.days_remaining !== null){
+          trialChip.style.display=''; trialChip.textContent = `Free trial: ${data.trial.days_remaining} day(s) left`;
+        } else if (data.subscription_status === 'active'){
+          trialChip.style.display=''; trialChip.textContent = 'Subscription: active';
+        } else {
+          trialChip.style.display='none';
+        }
       }else{
-        meSpan.textContent='Not signed in';
-        u.style.display=''; p.style.display=''; signupBtn.style.display=''; loginBtn.style.display='';
-        logoutBtn.style.display='none'; editProfileBtn.style.display='none';
-        displayNameEl.value=''; bioEl.value='';
+        meSpan.textContent = 'Not signed in';
+        openAuthBtn.style.display=''; logoutBtn.style.display='none'; editProfileBtn.style.display='none';
+        upgradeBtn.style.display='none'; billingBtn.style.display='none';
+        trialChip.style.display='none';
       }
     }
-    signupBtn.onclick=async()=>{ const username=u.value.trim(), password=p.value;
-      if(!username||!password) return alert('Enter username & password');
-      const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
-      const d=await r.json(); if(!r.ok) return alert(d.error||'Signup failed'); await refreshMe(); addBubble('Account created and signed in. 👋','bot'); loadSessions(); loadHistory();
+
+    loginSubmit.onclick = async ()=>{
+      const username = loginUsername.value.trim();
+      const password = loginPassword.value;
+      if(!username || !password) return alert('Enter username & password');
+      const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+      const d = await r.json();
+      if(!r.ok) return alert(d.error||'Login failed');
+      await refreshMe(); addBubble('Signed in.','bot'); loadSessions(); loadHistory(); closeAuth();
     };
-    loginBtn.onclick=async()=>{ const username=u.value.trim(), password=p.value;
-      if(!username||!password) return alert('Enter username & password');
-      const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
-      const d=await r.json(); if(!r.ok) return alert(d.error||'Login failed'); await refreshMe(); addBubble('Signed in.','bot'); loadSessions(); loadHistory();
+
+    signupSubmit.onclick = async ()=>{
+      const username = signupUsername.value.trim();
+      const password = signupPassword.value;
+      if(!username || !password) return alert('Enter username & password');
+      const r = await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+      const d = await r.json();
+      if(!r.ok) return alert(d.error||'Signup failed');
+      await refreshMe(); addBubble('Account created and signed in. 👋','bot'); loadSessions(); loadHistory(); closeAuth();
     };
+
     logoutBtn.onclick=async()=>{ await fetch('/api/logout',{method:'POST'}); await refreshMe(); addBubble('Signed out.','bot'); loadSessions(); chat.innerHTML=''; };
 
-    editProfileBtn.onclick=()=>openModal();
-    closeModalBtn.onclick=closeModal; cancelProfile.onclick=closeModal; modalBackdrop.onclick=closeModal;
-    saveProfile.onclick=async()=>{ const display_name=displayNameEl.value.trim(), bio=bioEl.value.trim();
-      const r=await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name,bio})});
-      const d=await r.json(); if(!r.ok) return alert(d.error||'Unable to save'); await refreshMe(); closeModal(); addBubble('Profile updated.','bot');
-    };
-
-    // Sessions
+    // ========= Sessions =========
     async function loadSessions(){
       const r=await fetch('/api/sessions'); const data=await r.json();
       sessionsEl.innerHTML='';
       (data.sessions||[]).forEach(s=>{
-        const el=document.createElement('div'); el.className='session'+(data.active===s.id?' active':'');
+        const el=document.createElement('div'); el.className='item'+(data.active===s.id?' active':'');
         el.textContent=s.title || 'Untitled';
         el.onclick=async()=>{ await fetch('/api/session/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:s.id})}); await loadHistory(); await loadSessions(); };
         sessionsEl.appendChild(el);
@@ -602,10 +802,12 @@ INDEX_HTML = """<!doctype html>
       if(r.ok){ await loadSessions(); await loadHistory(); }
     };
 
-    // Streaming send → single bot bubble, appending text
+    // ========= Streaming send =========
     async function sendMessage(){
       const msg=input.value.trim(); if(!msg) return; input.value=''; addBubble(msg,'user');
       const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+      if(res.status===401){ openAuth('login'); return; }
+      if(res.status===402){ const d=await res.json(); addBubble(d.error || 'Your free trial has ended. Please upgrade to continue.', 'bot'); return; }
       if(!res.ok){ addBubble('Error: '+(await res.text()),'bot'); return; }
       const reader=res.body.getReader(); const decoder=new TextDecoder(); let buf='', acc='';
       const bubbleEl=makeBotBubble();
@@ -626,11 +828,11 @@ INDEX_HTML = """<!doctype html>
     send.onclick=sendMessage;
     input.addEventListener('keydown',e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); } });
 
-    // Exports
+    // ========= Exports =========
     document.getElementById('download-txt').onclick=()=>{ window.location='/api/export?fmt=txt'; };
     document.getElementById('download-csv').onclick=()=>{ window.location='/api/export?fmt=csv'; };
 
-    // Billing (with donation reminder)
+    // ========= Billing =========
     document.getElementById('upgrade').onclick=async()=>{
       if(!confirm('Kind Friend donates 50% of all subscription fees to Samaritans. Continue to Checkout?')) return;
       const r=await fetch('/api/billing/checkout',{method:'POST'});
@@ -676,7 +878,6 @@ app.add_middleware(
 # =========================
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    # Inject donation strings safely
     html = INDEX_HTML.replace("%%DONATION_NOTE%%", DONATION_NOTE).replace("%%DONATION_LINK%%", DONATION_LINK)
     return HTMLResponse(html)
 
