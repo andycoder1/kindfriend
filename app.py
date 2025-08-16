@@ -336,385 +336,93 @@ LANDING_HTML = """<!doctype html>
 """
 
 # Chat Style app UI (LIGHT by default), auth-locked composer, spacing preserved, bot_name-aware
-INDEX_HTML = """<!doctype html>
-<html lang="en" data-theme="light">
+INDEX_HTML = """
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kind Friend</title>
-  <link rel="icon" href='data:image/svg+xml;utf8,
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0%" stop-color="%23075E54"/><stop offset="100%" stop-color="%2325D366"/>
-  </linearGradient></defs>
-  <circle cx="32" cy="32" r="30" fill="url(%23g)"/>
-  <text x="32" y="38" font-size="24" font-family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial" text-anchor="middle" fill="white">KF</text>
-</svg>'/>
   <style>
-    :root{--wa-green-dark:#075E54;--wa-green:#128C7E;--wa-accent:#25D366;--wa-bg:#f0f2f5;--wa-chat-bg:#e7f0ea;--wa-bubble-me:#d9fdd3;--wa-bubble-you:#ffffff;--wa-text:#111b21;--wa-muted:#54656f;--wa-border:#d1d7db;--panel:#ffffff;--panel-2:#ffffff;--radius:16px;--shadow:0 6px 24px rgba(0,0,0,.12)}
-    *{box-sizing:border-box} html,body{height:100%;margin:0}
-    body{color:var(--wa-text);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:var(--wa-bg)}
-    .app{display:grid;grid-template-columns:380px 1fr;height:100svh;overflow:hidden}
-    @media (max-width:1000px){.app{grid-template-columns:1fr}.sidebar{display:none}}
-    .topbar{height:60px;display:flex;align-items:center;gap:10px;padding:0 16px;background:linear-gradient(0deg,var(--wa-green-dark),var(--wa-green));color:#fff;box-shadow:var(--shadow)}
-    .logo{width:36px;height:36px;border-radius:10px;background:var(--wa-accent);display:grid;place-items:center;color:#073;font-weight:800}
-    .brand{font-weight:800;letter-spacing:.2px}.grow{flex:1 1 auto}
-    .chip{font-size:12px;color:#eafff0;background:rgba(255,255,255,.15);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.25)}
-    #trial-chip{display:none}
-    .tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
-    .tb-btn.primary{background:#fff;color:#073}
-    .sidebar{display:flex;flex-direction:column;height:calc(100svh - 60px);border-right:1px solid var(--wa-border);background:var(--panel)}
-    .side-head{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--wa-border)}
-    .side-actions{display:flex;gap:8px;padding:12px}
-    .list{overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:8px}
-    .item{padding:10px 12px;background:var(--panel-2);border:1px solid var(--wa-border);border-radius:12px;cursor:pointer}
-    .item.active{outline:2px solid var(--wa-accent)}
-    .main{display:flex;flex-direction:column;height:calc(100svh - 60px);background:var(--wa-chat-bg);position:relative}
-    .chatbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--wa-border);background:var(--panel);padding:10px 12px}
-    .auth .tb-btn{background:var(--wa-green);border-color:transparent}.auth .tb-btn.text{background:transparent;border-color:var(--wa-border);color:var(--wa-text)}
-    .bg{position:absolute;inset:0;pointer-events:none;opacity:.05;background-image:radial-gradient(circle at 15% 10%,#000 1px,transparent 1px),radial-gradient(circle at 80% 30%,#000 1px,transparent 1px),radial-gradient(circle at 40% 70%,#000 1px,transparent 1px),radial-gradient(circle at 60% 90%,#000 1px,transparent 1px);background-size:240px 240px,220px 220px,260px 260px,200px 200px}
-    .chat{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 16px;display:grid;gap:8px}
-    .row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:end}
-    .row.user{grid-template-columns:1fr auto}.row.user .avatar{display:none}
-    .avatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--wa-green);font-weight:800}
-    .bubble{max-width:70ch;padding:10px 12px;border-radius:16px;color:var(--wa-text);position:relative;white-space:pre-wrap;word-wrap:anywhere;box-shadow:0 1px 0 rgba(0,0,0,.08);border:1px solid var(--wa-border)}
-    .row.user .bubble{background:var(--wa-bubble-me)} .row.bot .bubble{background:var(--wa-bubble-you)}
-    .row.user .bubble::after{content:"";position:absolute;right:-6px;bottom:0;width:12px;height:12px;background:var(--wa-bubble-me);clip-path:polygon(0 0,100% 100%,0 100%);border-right:1px solid var(--wa-border);border-bottom:1px solid var(--wa-border)}
-    .row.bot .bubble::before{content:"";position:absolute;left:-6px;bottom:0;width:12px;height:12px;background:var(--wa-bubble-you);clip-path:polygon(0 100%,100% 0,100% 100%);border-left:1px solid var(--wa-border);border-bottom:1px solid var(--wa-border)}
-    .meta{display:flex;gap:8px;align-items:center;color:var(--wa-muted);font-size:11px;margin-top:4px}
-    .composer{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px;border-top:1px solid var(--wa-border);background:var(--panel)}
-    .input{padding:12px 14px;border-radius:999px;border:1px solid var(--wa-border);background:var(--panel-2);color:var(--wa-text)}
-    .send{background:var(--wa-green);color:#fff;border:none;padding:10px 16px;border-radius:999px;cursor:pointer}
-    .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40}
-    .modal{display:none;position:fixed;inset:0;z-index:50;place-items:center}
-    .modal.on,.modal-backdrop.on{display:grid}
-    .modal-card{width:min(520px,94vw);background:var(--panel);color:var(--wa-text);border:1px solid var(--wa-border);border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:16px}
-    .modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-    .modal-title{font-weight:800;font-size:16px}
-    .xbtn{border:1px solid var(--wa-border);background:var(--panel-2);color:var(--wa-text);border-radius:10px;padding:6px 10px;cursor:pointer}
-    .form-row{display:grid;gap:6px;margin:10px 0}
-    .form-row input,.form-row textarea{padding:10px 12px;border-radius:12px;border:1px solid var(--wa-border);background:var(--panel-2);color:var(--wa-text)}
-    .row .bubble p{margin:0 0 6px 0}.row .bubble p:last-child{margin:0}
-    .link{color:var(--wa-green)}
-    body.large .bubble{font-size:17px;line-height:1.6}
+    body {
+      margin: 0; font-family: 'Segoe UI', sans-serif;
+      background: #f4fdf6; display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      background: #25d366; color: white; padding: 1rem;
+      display: flex; align-items: center; gap: 1rem;
+    }
+    header img {
+      width: 40px; height: 40px; border-radius: 50%; border: 2px solid white;
+    }
+    header h1 {
+      margin: 0; font-size: 1.3rem;
+    }
+    #chat {
+      flex: 1; overflow-y: auto; padding: 1rem; background: #e5ddd5;
+      display: flex; flex-direction: column;
+    }
+    .message {
+      max-width: 70%; padding: .6rem .9rem; margin: .3rem 0;
+      border-radius: 18px; line-height: 1.4;
+      word-wrap: break-word; white-space: pre-wrap;
+    }
+    .user {
+      background: #dcf8c6; align-self: flex-end; border-bottom-right-radius: 4px;
+    }
+    .bot {
+      background: white; align-self: flex-start; border-bottom-left-radius: 4px;
+    }
+    form {
+      display: flex; padding: .6rem; background: #f0f0f0;
+    }
+    input {
+      flex: 1; padding: .6rem; border: 1px solid #ccc; border-radius: 20px; font-size: 1rem;
+    }
+    button {
+      margin-left: .6rem; background: #25d366; border: none; color: white;
+      padding: .6rem 1rem; border-radius: 20px; cursor: pointer; font-size: 1rem;
+    }
+    button:hover { background: #1fa855; }
   </style>
 </head>
 <body>
-  <div class="topbar">
-    <div class="logo">KF</div>
-    <div class="brand">Kind Friend · <span id="botname-head">Chatting with Kind Friend</span></div>
-    <div class="grow"></div>
-    <span class="chip" id="me">Not signed in</span>
-    <span class="chip" id="trial-chip"></span>
-    <button id="theme" class="tb-btn">Theme</button>
-    <button id="download-txt" class="tb-btn">.txt</button>
-    <button id="download-csv" class="tb-btn">.csv</button>
-  </div>
+  <header>
+    <img src="https://cdn-icons-png.flaticon.com/512/2922/2922510.png" alt="Kind Friend Avatar">
+    <h1>Kind Friend</h1>
+  </header>
 
-  <div class="app">
-    <aside class="sidebar">
-      <div class="side-head"><div style="font-weight:700;">Chats</div></div>
-      <div class="side-actions">
-        <button id="new-chat" class="tb-btn primary">New chat</button>
-        <button id="large" class="tb-btn">A A</button>
-      </div>
-      <div class="list" id="sessions"></div>
-    </aside>
+  <div id="chat"></div>
 
-    <main class="main">
-      <div class="bg"></div>
-      <div class="chatbar">
-        <div class="auth" id="auth" style="display:flex;gap:8px;align-items:center;">
-          <button id="open-auth" class="tb-btn primary">Sign in / up</button>
-          <button id="logout" class="tb-btn text" style="display:none;">Log out</button>
-          <button id="edit-profile" class="tb-btn text" style="display:none;">Profile</button>
-          <button id="upgrade" class="tb-btn primary" style="display:none;">Upgrade</button>
-          <button id="billing" class="tb-btn text" style="display:none;">Billing</button>
-          <button id="donation-note" class="tb-btn text" title="We donate half of all fees">50% to Samaritans</button>
-        </div>
-      </div>
-
-      <section class="chat" id="chat"></section>
-
-      <div class="composer">
-        <input id="message" class="input" autocomplete="off" placeholder="Sign in to start chatting" disabled />
-        <button id="send" class="send" disabled>Send</button>
-      </div>
-    </main>
-  </div>
-
-  <!-- Auth Modal -->
-  <div class="modal-backdrop" id="auth-backdrop"></div>
-  <div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="modal-title" id="auth-title">Welcome to Kind Friend</div>
-        <button class="xbtn" id="auth-close">Close</button>
-      </div>
-      <div class="tabs" style="display:flex;gap:8px;margin-bottom:8px;">
-        <button id="tab-login"  class="tb-btn" aria-selected="true">Log in</button>
-        <button id="tab-signup" class="tb-btn">Sign up</button>
-      </div>
-      <div id="pane-login">
-        <div class="form-row"><label for="login-username">Username</label><input id="login-username" placeholder="yourname"/></div>
-        <div class="form-row"><label for="login-password">Password</label><input id="login-password" type="password" placeholder="••••••••"/></div>
-        <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
-          <button class="xbtn" id="login-cancel">Cancel</button>
-          <button class="tb-btn primary" id="login-submit">Log in</button>
-        </div>
-      </div>
-      <div id="pane-signup" style="display:none;">
-        <div class="form-row"><label for="signup-username">Username</label><input id="signup-username" placeholder="yourname"/></div>
-        <div class="form-row"><label for="signup-password">Password</label><input id="signup-password" type="password" placeholder="Create a password"/></div>
-        <div class="form-row"><label for="signup-botname">Bot name</label><input id="signup-botname" placeholder="e.g., Tony or Jane" value="Kind Friend"/></div>
-        <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
-          <button class="xbtn" id="signup-cancel">Cancel</button>
-          <button class="tb-btn primary" id="signup-submit">Create account</button>
-        </div>
-      </div>
-      <div class="donate" style="margin-top:10px;color:#54656f">
-        💚 <strong>50% donated</strong> to <a class="link" href="https://www.samaritans.org/" target="_blank" rel="noopener">Samaritans</a>.
-      </div>
-    </div>
-  </div>
-
-  <!-- Profile Modal -->
-  <div class="modal-backdrop" id="modal-backdrop"></div>
-  <div class="modal" id="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="modal-title" id="profile-title">Edit profile</div>
-        <button class="xbtn" id="close-modal">Close</button>
-      </div>
-      <div class="form-row"><label for="display_name">Display name</label><input id="display_name" placeholder="How should Kind Friend address you?"/></div>
-      <div class="form-row"><label for="bio">Bio</label><textarea id="bio" rows="4" placeholder="Anything you'd like KF to remember (non-sensitive)."></textarea></div>
-      <div class="form-row"><label for="bot_name">Bot name</label><input id="bot_name" placeholder="e.g., Tony, Jane" value="Kind Friend"/></div>
-      <div class="form-actions" style="display:flex;gap:8px;justify-content:flex-end;">
-        <button class="xbtn" id="cancel-profile">Cancel</button>
-        <button class="tb-btn primary" id="save-profile">Save</button>
-      </div>
-    </div>
-  </div>
+  <form id="chat-form">
+    <input id="user-input" type="text" placeholder="Type your message..." required>
+    <button type="submit">Send</button>
+  </form>
 
   <script>
-    // Renderer toggle: exact spacing vs links
-    const USE_TEXTCONTENT = false;
-
-    const root = document.documentElement;
-    const savedTheme = localStorage.getItem('kf-theme'); if (savedTheme) root.setAttribute('data-theme', savedTheme);
-    document.getElementById('theme').addEventListener('click', () => {
-      const next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-      root.setAttribute('data-theme', next); localStorage.setItem('kf-theme', next);
-    });
-
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('user-input');
     const chat = document.getElementById('chat');
-    const input = document.getElementById('message');
-    const send  = document.getElementById('send');
-    const sessionsEl = document.getElementById('sessions');
-    const largeBtn = document.getElementById('large');
-    const donationBtn = document.getElementById('donation-note');
-    const botnameHead = document.getElementById('botname-head');
 
-    let BOT_NAME = 'Kind Friend';
-    let isAuthed = false;
-
-    function setComposerEnabled(on){
-      input.disabled = !on; send.disabled = !on;
-      input.placeholder = on ? "Type a message" : "Sign in to start chatting";
-    }
-    setComposerEnabled(false);
-
-    function initials(name){
-      const parts = (name||'').trim().split(/\s+/).slice(0,2);
-      return parts.map(s=>s[0]||'').join('').toUpperCase() || 'KF';
+    function addMessage(text, sender) {
+      const div = document.createElement('div');
+      div.className = 'message ' + sender;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
     }
 
-    donationBtn.addEventListener('click', () => {
-      alert('💚 ' + '%%DONATION_NOTE%%' + '\\nLearn more: %%DONATION_LINK%%');
-    });
-    largeBtn.addEventListener('click', () => { document.body.classList.toggle('large'); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = input.value;
+      addMessage(text, 'user');
+      input.value = '';
 
-    function md(x){
-      const esc = x.replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
-      const withLinks = esc.replace(/(https?:\\/\\/\\S+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-      return withLinks.replace(/\\n/g, '<br/>');
-    }
-    function setBubbleContent(el, text){ if(USE_TEXTCONTENT){ el.textContent=text; } else { el.innerHTML=md(text); } }
-
-    function makeBotBubble(){
-      const row=document.createElement('div'); row.className='row bot';
-      const av=document.createElement('div'); av.className='avatar'; av.textContent=initials(BOT_NAME);
-      const b=document.createElement('div'); b.className='bubble'; b.innerHTML='';
-      const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-      row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);
-      chat.appendChild(row); chat.scrollTop=chat.scrollHeight; return b;
-    }
-    function addBubble(text, who){
-      const row=document.createElement('div'); row.className='row '+who;
-      const av=document.createElement('div'); av.className='avatar'; av.textContent=(who==='bot')?initials(BOT_NAME):'You';
-      const b=document.createElement('div'); b.className='bubble'; setBubbleContent(b, text);
-      const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-      if(who==='bot'){ row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); }
-      else { const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); row.style.gridTemplateColumns='1fr auto'; }
-      chat.appendChild(row); chat.scrollTop=chat.scrollHeight;
-    }
-
-    // ======= Auth modal wiring (same as before, plus bot_name) =======
-    const meSpan = document.getElementById('me');
-    const trialChip = document.getElementById('trial-chip');
-    const logoutBtn = document.getElementById('logout');
-    const editProfileBtn = document.getElementById('edit-profile');
-    const upgradeBtn = document.getElementById('upgrade');
-    const billingBtn = document.getElementById('billing');
-    const openAuthBtn = document.getElementById('open-auth');
-
-    const authModal = document.getElementById('auth-modal');
-    const authBackdrop = document.getElementById('auth-backdrop');
-    const authClose = document.getElementById('auth-close');
-    const tabLogin = document.getElementById('tab-login');
-    const tabSignup = document.getElementById('tab-signup');
-    const paneLogin = document.getElementById('pane-login');
-    const paneSignup = document.getElementById('pane-signup');
-
-    const loginUsername = document.getElementById('login-username');
-    const loginPassword = document.getElementById('login-password');
-    const loginSubmit   = document.getElementById('login-submit');
-    const loginCancel   = document.getElementById('login-cancel');
-
-    const signupUsername = document.getElementById('signup-username');
-    const signupPassword = document.getElementById('signup-password');
-    const signupBotname  = document.getElementById('signup-botname');
-    const signupSubmit   = document.getElementById('signup-submit');
-    const signupCancel   = document.getElementById('signup-cancel');
-
-    function openAuth(which='login'){ authModal.classList.add('on'); authBackdrop.classList.add('on'); (which==='signup'?showSignup():showLogin()); setTimeout(()=>{ (which==='signup'?signupUsername:loginUsername).focus(); },50); }
-    function closeAuth(){ authModal.classList.remove('on'); authBackdrop.classList.remove('on'); }
-    function showLogin(){ paneLogin.style.display=''; paneSignup.style.display='none'; tabLogin.classList.add('primary'); tabSignup.classList.remove('primary'); tabLogin.setAttribute('aria-selected','true'); tabSignup.setAttribute('aria-selected','false'); }
-    function showSignup(){ paneLogin.style.display='none'; paneSignup.style.display=''; tabSignup.classList.add('primary'); tabLogin.classList.remove('primary'); tabLogin.setAttribute('aria-selected','false'); tabSignup.setAttribute('aria-selected','true'); }
-
-    openAuthBtn.onclick = ()=>openAuth('login'); authClose.onclick=closeAuth; authBackdrop.onclick=closeAuth; loginCancel.onclick=closeAuth; signupCancel.onclick=closeAuth; tabLogin.onclick=showLogin; tabSignup.onclick=showSignup;
-
-    function setComposerByAuth(){
-      if(isAuthed){ setComposerEnabled(true); } else { setComposerEnabled(false); }
-    }
-
-    async function refreshMe(){
-      const r = await fetch('/api/me'); const data = await r.json();
-      if(data.user){
-        isAuthed = True = true; // keep compatibility with older code if any
-        setComposerEnabled(true);
-        BOT_NAME = (data.user.bot_name || 'Kind Friend');
-        botnameHead.textContent = 'Chatting with ' + BOT_NAME;
-
-        meSpan.textContent = `Signed in as ${data.user.display_name||data.user.username}`;
-        openAuthBtn.style.display='none'; logoutBtn.style.display=''; editProfileBtn.style.display='';
-        upgradeBtn.style.display=''; billingBtn.style.display='';
-        if(data.trial && data.trial.days_remaining !== null){
-          trialChip.style.display=''; trialChip.textContent = `Free trial: ${data.trial.days_remaining} day(s) left`;
-        } else if (data.subscription_status === 'active'){
-          trialChip.style.display=''; trialChip.textContent = 'Subscription: active';
-        } else { trialChip.style.display='none'; }
-      } else {
-        isAuthed = false; setComposerEnabled(false);
-        BOT_NAME = 'Kind Friend'; botnameHead.textContent = 'Chatting with Kind Friend';
-        meSpan.textContent = 'Not signed in';
-        openAuthBtn.style.display=''; logoutBtn.style.display='none'; editProfileBtn.style.display='none';
-        upgradeBtn.style.display='none'; billingBtn.style.display='none'; trialChip.style.display='none';
-      }
-    }
-
-    loginSubmit.onclick = async ()=>{
-      const username = loginUsername.value.trim(); const password = loginPassword.value;
-      if(!username || !password) return alert('Enter username & password');
-      const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
-      const d = await r.json(); if(!r.ok) return alert(d.error||'Login failed');
-      await refreshMe(); addBubble('Signed in.','bot'); loadSessions(); loadHistory(); closeAuth();
-    };
-    signupSubmit.onclick = async ()=>{
-      const username = signupUsername.value.trim(); const password = signupPassword.value; const bot_name = signupBotname.value.trim() || 'Kind Friend';
-      if(!username || !password) return alert('Enter username & password');
-      const r = await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password,bot_name})});
-      const d = await r.json(); if(!r.ok) return alert(d.error||'Signup failed');
-      await refreshMe(); addBubble('Account created and signed in. 👋','bot'); loadSessions(); loadHistory(); closeAuth();
-    };
-    logoutBtn.onclick=async()=>{ await fetch('/api/logout',{method:'POST'}); await refreshMe(); addBubble('Signed out.','bot'); loadSessions(); chat.innerHTML=''; };
-
-    // Profile save
-    const profileModal = document.getElementById('profile-modal'), back2 = document.getElementById('modal-backdrop');
-    const saveProfile = document.getElementById('save-profile'); const cancelProfile = document.getElementById('cancel-profile'); const closeModalBtn = document.getElementById('close-modal');
-    const displayNameEl = document.getElementById('display_name'); const bioEl = document.getElementById('bio'); const botNameEl = document.getElementById('bot_name');
-
-    document.getElementById('edit-profile').onclick = async ()=>{ profileModal.classList.add('on'); back2.classList.add('on'); const r=await fetch('/api/me'); const d=await r.json(); if(d.user){ displayNameEl.value=d.user.display_name||''; bioEl.value=d.user.bio||''; botNameEl.value=d.user.bot_name || 'Kind Friend'; } };
-    function closeProfile(){ profileModal.classList.remove('on'); back2.classList.remove('on'); }
-    closeModalBtn.onclick=closeProfile; cancelProfile.onclick=closeProfile; back2.onclick=closeProfile;
-
-    saveProfile.onclick = async ()=>{
-      const display_name = displayNameEl.value; const bio = bioEl.value; const bot_name = botNameEl.value.trim() || 'Kind Friend';
-      const r = await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name,bio,bot_name})});
-      const d = await r.json(); if(!r.ok) return alert(d.error||'Could not save');
-      BOT_NAME = bot_name; botnameHead.textContent = 'Chatting with ' + BOT_NAME; closeProfile(); addBubble('Profile updated.','bot');
-    };
-
-    // Sessions
-    async function loadSessions(){ const r=await fetch('/api/sessions'); const data=await r.json(); sessionsEl.innerHTML=''; (data.sessions||[]).forEach(s=>{ const el=document.createElement('div'); el.className='item'+(data.active===s.id?' active':''); el.textContent=s.title||'Untitled'; el.onclick=async()=>{ await fetch('/api/session/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:s.id})}); await loadHistory(); await loadSessions(); }; sessionsEl.appendChild(el); }); }
-    async function loadHistory(){ const r=await fetch('/api/history'); const data=await r.json(); chat.innerHTML=''; (data.messages||[]).forEach(m=>addBubble(m.content, m.role==='assistant'?'bot':'user')); }
-
-    document.getElementById('new-chat').onclick=async()=>{
-      if(!isAuthed){ openAuth('signup'); return; }
-      const title=prompt('Name your chat (optional):','New chat')||'New chat';
-      const r=await fetch('/api/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});
-      if(r.ok){ await loadSessions(); await loadHistory(); }
-    };
-
-    // Streaming send (NO trimming of chunks)
-    async function sendMessage(){
-      if(!isAuthed){ openAuth('signup'); return; }
-      const msg=input.value.trim(); if(!msg) return; input.value=''; addBubble(msg,'user');
-      const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
-      if(res.status===401){ openAuth('login'); return; }
-      if(res.status===402){ const d=await res.json(); addBubble(d.error || 'Your free trial has ended. Please upgrade to continue.', 'bot'); return; }
-      if(!res.ok){ addBubble('Error: '+(await res.text()),'bot'); return; }
-      const reader=res.body.getReader(); const decoder=new TextDecoder(); let buf='', acc=''; const bubbleEl=makeBotBubble();
-      while(true){ const {value,done}=await reader.read(); if(done) break;
-        buf+=decoder.decode(value,{stream:true});
-        const parts=buf.split("\\n\\n"); buf=parts.pop()||'';
-        for(const part of parts){
-          if(!part.startsWith('data:')) continue;
-          const raw = part.slice(5);               // do not trim here (spaces matter)
-          if(raw.trim()==='[DONE]') continue;
-          const chunk = raw.replace(/\\\\n/g,'\\n');
-          acc += chunk;
-          setBubbleContent(bubbleEl, acc);
-          chat.scrollTop=chat.scrollHeight;
-        }
-      }
-    }
-    send.onclick=sendMessage;
-    input.addEventListener('keydown',e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); } });
-
-    document.getElementById('download-txt').onclick=()=>{ window.location='/api/export?fmt=txt'; };
-    document.getElementById('download-csv').onclick=()=>{ window.location='/api/export?fmt=csv'; };
-
-    document.getElementById('upgrade').onclick=async()=>{
-      if(!confirm('Kind Friend donates 50% of all subscription fees to Samaritans. Continue to Checkout?')) return;
-      const r=await fetch('/api/billing/checkout',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.url) return alert(d.error||'Checkout unavailable'); window.location=d.url;
-    };
-    document.getElementById('billing').onclick=async()=>{
-      const r=await fetch('/api/billing/portal',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.url) return alert(d.error||'Portal unavailable'); window.location=d.url;
-    };
-
-    // Auto-open auth based on ?mode=login|signup from landing
-    (function(){ const p=new URLSearchParams(location.search); const b=p.get('billing'); const m=p.get('mode');
-      if(b==='success'){ addBubble('Thank you! Your subscription is active. 💚 We donate 50% of all fees to Samaritans.', 'bot'); }
-      else if(b==='cancel'){ addBubble('No problem — you can upgrade any time. 💚 50% goes to Samaritans.', 'bot'); }
-      if(m && !isAuthed){ openAuth(m); }
-    })();
-
-    (async()=>{ await refreshMe(); await loadSessions(); await loadHistory(); })();
-  </script>
-</body>
-</html>
-"""
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
 
 # =========================
 # FastAPI app & middleware
