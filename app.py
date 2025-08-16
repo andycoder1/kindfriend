@@ -320,7 +320,7 @@ LANDING_HTML = """<!doctype html>
         <div class="list">
           <div>• Friendly chat (not therapy), with crisis signposting</div>
           <div>• Name your companion (e.g. Tony, Jane)</div>
-          <div>• Clean, WhatsApp-style UI</div>
+          <div>• Clean, chat-style interface</div>
           <div>• Export chats (.txt / .csv)</div>
         </div>
       </div>
@@ -335,7 +335,7 @@ LANDING_HTML = """<!doctype html>
 </html>
 """
 
-# WhatsApp-style app UI (LIGHT by default), auth-locked composer, spacing preserved, bot_name-aware
+# Chat Style app UI (LIGHT by default), auth-locked composer, spacing preserved, bot_name-aware
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-theme="light">
 <head>
