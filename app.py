@@ -174,7 +174,7 @@ def get_current_user_id(request: Request) -> Optional[str]:
         return None
 
 # ---------- HTML ----------
-LANDING_HTML = """<!doctype html>
+LANDING_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
@@ -240,7 +240,7 @@ LANDING_HTML = """<!doctype html>
 </html>
 """
 
-INDEX_HTML = """<!doctype html>
+INDEX_HTML = r"""<!doctype html>
 <html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
