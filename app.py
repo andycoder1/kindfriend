@@ -5,22 +5,21 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, Query, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles  # <-- serve /static
 
 # ----- Password hashing -----
 try:
     import bcrypt
-    def hash_password(p: str) -> str: return bcrypt.hashpw(p.encode(), bcrypt.genssalt()).decode()
+    def hash_password(p: str) -> str:
+        return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+    def check_password(p: str, h: str) -> bool:
+        return bcrypt.checkpw(p.encode(), h.encode())
 except Exception:
     import hashlib
     print("⚠ bcrypt not found — using SHA256 fallback (dev only).", file=sys.stderr)
-    def hash_password(p: str) -> str: return hashlib.sha256(p.encode()).hexdigest()
-
-try:
-    import bcrypt  # ensure check function exists
-    def check_password(p: str, h: str) -> bool: return bcrypt.checkpw(p.encode(), h.encode())
-except Exception:
-    def check_password(p: str, h: str) -> bool: 
-        import hashlib
+    def hash_password(p: str) -> str:
+        return hashlib.sha256(p.encode()).hexdigest()
+    def check_password(p: str, h: str) -> bool:
         return hashlib.sha256(p.encode()).hexdigest() == h
 
 from itsdangerous import URLSafeSerializer, BadSignature
@@ -30,6 +29,9 @@ try:
     import stripe  # type: ignore
 except Exception:
     stripe = None
+
+# ----- Pydantic -----
+from pydantic import BaseModel
 
 # =========================
 # Config & Paths
@@ -127,7 +129,7 @@ def init_db():
             checkin_minute INTEGER,
             checkin_last_date TEXT
         )""")
-        # Migrations
+        # Migrations (idempotent)
         def ensure_col(table, col, ddl):
             try:
                 cur.execute(f"SELECT {col} FROM {table} LIMIT 1")
@@ -142,7 +144,7 @@ def init_db():
         ensure_col("users", "checkin_hour", "ALTER TABLE users ADD COLUMN checkin_hour INTEGER")
         ensure_col("users", "checkin_minute", "ALTER TABLE users ADD COLUMN checkin_minute INTEGER")
         ensure_col("users", "checkin_last_date", "ALTER TABLE users ADD COLUMN checkin_last_date TEXT")
-        # Rate-limit
+        # Rate-limit bucket
         cur.execute("CREATE TABLE IF NOT EXISTS rate_limit (key TEXT PRIMARY KEY, tokens REAL, updated REAL)")
         conn.commit()
 
@@ -347,7 +349,7 @@ def get_context_memories(user_id: str, max_items: int = 8):
         rows = cur.fetchall()
     return [f"{t}: {c}" for (t, c) in rows]
 
-# ----- Tone preference stored in pinned preference memory -----
+# ----- Tone prefs -----
 TONE_PRESETS = {
     "warm_concise": "warm, kind, and concise",
     "cheerful": "cheerful, upbeat, and supportive",
@@ -400,7 +402,6 @@ def suggest_memories_from_text(text: str):
     low = s.lower()
     suggestions = []
 
-    # Name preferences
     for pat in ["call me ", "my name is ", "you can call me "]:
         if pat in low:
             after = s[low.index(pat)+len(pat):].strip().strip(".! ").split()[0:6]
@@ -409,28 +410,23 @@ def suggest_memories_from_text(text: str):
                 suggestions.append({"type":"profile","content":f"preferred name: {val}", "pinned": True, "ttl_days": None})
                 break
 
-    # Pronouns
     if "my pronouns are" in low:
         val = s[low.index("my pronouns are")+len("my pronouns are"):].strip(" .!").split()[0:6]
         val = " ".join(val).strip(",. ")
         if val:
             suggestions.append({"type":"preference","content":f"pronouns: {val}", "pinned": True, "ttl_days": None})
 
-    # Likes / preferences
     if any(x in low for x in ["i like ", "i love ", "my favourite", "my favorite"]):
         suggestions.append({"type":"preference","content":s, "pinned": False, "ttl_days": 365})
 
-    # Work/schedule facts
     if "i work " in low or "my job" in low or "i study" in low:
         suggestions.append({"type":"fact","content":s, "pinned": False, "ttl_days": 365})
 
-    # Explicit "remember"
     if low.startswith(("remember ", "please remember ", "can you remember ")):
         payload = s.split(None, 1)[1] if len(s.split(None, 1))>1 else ""
         if payload:
             suggestions.append({"type":"note","content":payload.strip(), "pinned": False, "ttl_days": 365})
 
-    # Contextual late-night work hint
     try:
         tz_name = os.getenv("APP_TZ", "Europe/London")
         hour = datetime.datetime.now(ZoneInfo(tz_name)).hour
@@ -516,6 +512,7 @@ LANDING_HTML = """<!doctype html>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Kind Friend — A kinder AI companion</title>
+  <link rel="icon" href="/static/favicon.ico">
   <style>
     body { margin:0; font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial; background:#f4fdf6; color:#333; text-align:center; }
     header { background:#25d366; color:#fff; padding:2rem 1rem; }
@@ -539,22 +536,22 @@ LANDING_HTML = """<!doctype html>
 </header>
 
 <div class="hero">
-  <img src="https://source.unsplash.com/1000x500/?friends,coffee" alt="People chatting over coffee">
+  <img src="/static/coffee_chat.jpg" alt="People chatting over coffee">
 </div>
 
 <section class="features">
   <div class="feature">
-    <img src="https://img.icons8.com/color/96/speech-bubble.png" alt="Chat bubble">
+    <img src="/static/icon_chat.svg" alt="Chat bubble">
     <h3>Natural Conversations</h3>
     <p>A familiar, friendly chat interface that feels easy and welcoming.</p>
   </div>
   <div class="feature">
-    <img src="https://img.icons8.com/color/96/lock.png" alt="Privacy">
+    <img src="/static/icon_lock.svg" alt="Privacy">
     <h3>Private & Secure</h3>
     <p>You control what’s remembered. View and delete memories any time.</p>
   </div>
   <div class="feature">
-    <img src="https://img.icons8.com/color/96/heart.png" alt="Support">
+    <img src="/static/icon_heart.svg" alt="Support">
     <h3>Supporting Good Causes</h3>
     <p>We donate 50% of all subscription fees directly to Samaritans.</p>
   </div>
@@ -569,19 +566,20 @@ LANDING_HTML = """<!doctype html>
   © 2025 Kind Friend • Bringing kindness to every conversation
   <br>
   <span>In proud support of</span>
-  <img src="https://upload.wikimedia.org/wikipedia/en/3/3e/Samaritans_logo.png" alt="Samaritans">
+  <img src="/static/samaritans_logo.png" alt="Samaritans">
 </footer>
 </body>
 </html>
 """
 
-# ---- APP UI (light default), chat-style, avatars, consent bar, tone + check-in ----
+# ---- Chat app UI (light theme default, with avatars, consent bar, tone & check-in) ----
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kind Friend</title>
+  <link rel="icon" href="/static/favicon.ico">
   <style>
     :root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--chatbg:#e7f0ea;--me:#d9fdd3;--bot:#ffffff;--br:#d1d7db;--panel:#ffffff;--shadow:0 6px 24px rgba(0,0,0,.12)}
     *{box-sizing:border-box} html,body{height:100%;margin:0}
@@ -871,7 +869,6 @@ INDEX_HTML = """<!doctype html>
     const signupBotname  = document.getElementById('signup-botname');
     const signupSubmit   = document.getElementById('signup-submit');
 
-    // avatar pickers
     const signupAvGrid = document.getElementById('signup-avatars');
     const profileAvGrid = document.getElementById('profile-avatars');
     let signupAvatar = '';
@@ -879,7 +876,11 @@ INDEX_HTML = """<!doctype html>
 
     function renderAvGrid(container, current, onPick){
       container.innerHTML='';
-      AVATARS.forEach(url=>{
+      ["https://images.unsplash.com/photo-1527980965255-d3b416303d12?q=80&w=240&auto=format&fit=crop",
+       "https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=240&auto=format&fit=crop",
+       "https://images.unsplash.com/photo-1547425260-76bcadfb4f2c?q=80&w=240&auto=format&fit=crop",
+       "https://images.unsplash.com/photo-1544005316-04ce1f2b5333?q=80&w=240&auto=format&fit=crop"]
+      .forEach(url=>{
         const cell=document.createElement('div'); cell.className='avatar-choice'+(current===url?' selected':'');
         const img=document.createElement('img'); img.src=url; img.alt='Avatar';
         cell.appendChild(img);
@@ -890,7 +891,6 @@ INDEX_HTML = """<!doctype html>
         };
         container.appendChild(cell);
       });
-      // "None" option
       const none=document.createElement('div'); none.className='avatar-choice'+(!current?' selected':'');
       none.style.display='grid'; none.style.placeItems='center'; none.style.height='72px'; none.style.border='2px dashed #d1d7db';
       none.textContent='No avatar';
@@ -928,7 +928,6 @@ INDEX_HTML = """<!doctype html>
           trialChip.style.display=''; trialChip.textContent = 'Subscription: active';
         } else { trialChip.style.display='none'; }
 
-        // If server says a check-in is due, show it once
         if (data.checkin_due_text) { addBubble(data.checkin_due_text, 'bot'); }
       } else {
         isAuthed = false; setComposerEnabled(false);
@@ -937,6 +936,9 @@ INDEX_HTML = """<!doctype html>
         openAuthBtn.style.display=''; logoutBtn.style.display='none'; editProfileBtn.style.display='none'; upgradeBtn.style.display='none'; billingBtn.style.display='none'; trialChip.style.display='none';
       }
     }
+
+    const loginSubmit = document.getElementById('login-submit');
+    const signupSubmit = document.getElementById('signup-submit');
 
     loginSubmit.onclick = async ()=>{
       const username = loginUsername.value.trim(); const password = loginPassword.value;
@@ -1057,7 +1059,7 @@ INDEX_HTML = """<!doctype html>
         if (!r.ok) { addBubble('Couldn’t load memories.', 'bot'); return true; }
         if (!d.memories || !d.memories.length) { addBubble('You have no saved memories yet.', 'bot'); return true; }
         const lines = d.memories.slice(0,12).map(m => `• [${m.type}] ${m.content}`);
-        addBubble('Your memories:\n' + lines.join('\n'), 'bot'); return true;
+        addBubble('Your memories:\\n' + lines.join('\\n'), 'bot'); return true;
       }
       if (msg.startsWith('/forget ')) {
         const needle = msg.slice(8).trim().toLowerCase();
@@ -1161,31 +1163,6 @@ INDEX_HTML = """<!doctype html>
       const r=await fetch('/api/billing/portal',{method:'POST'}); const d=await r.json(); if(!r.ok||!d.url) return alert(d.error||'Portal unavailable'); window.location=d.url;
     };
 
-    // Auth state & initial load
-    const meSpan = document.getElementById('me');
-    async function refreshAuth(){
-      const r = await fetch('/api/me'); const data = await r.json();
-      const openAuthBtn = document.getElementById('open-auth'); const logoutBtn = document.getElementById('logout'); const editProfileBtn = document.getElementById('edit-profile'); const upgradeBtn = document.getElementById('upgrade'); const billingBtn = document.getElementById('billing'); const trialChip = document.getElementById('trial-chip');
-      if(data.user){
-        isAuthed = true; setComposerEnabled(true);
-        BOT_NAME = (data.user.bot_name || 'Kind Friend'); botnameHead.textContent = 'Chatting with ' + BOT_NAME;
-        BOT_AVATAR_URL = data.user.bot_avatar || ''; if(BOT_AVATAR_URL){ botAvatarTop.style.display=''; botAvatarTop.src = BOT_AVATAR_URL; } else { botAvatarTop.style.display='none'; }
-        meSpan.textContent = `Signed in as ${data.user.display_name||data.user.username}`;
-        openAuthBtn.style.display='none'; logoutBtn.style.display=''; editProfileBtn.style.display=''; upgradeBtn.style.display=''; billingBtn.style.display='';
-
-        if(data.trial && data.trial.days_remaining !== null){ trialChip.style.display=''; trialChip.textContent = `Free trial: ${data.trial.days_remaining} day(s) left`; }
-        else if (data.subscription_status === 'active'){ trialChip.style.display=''; trialChip.textContent = 'Subscription: active'; }
-        else { trialChip.style.display='none'; }
-
-        if (data.checkin_due_text) { addBubble(data.checkin_due_text, 'bot'); }
-      } else {
-        isAuthed = false; setComposerEnabled(false);
-        BOT_NAME = 'Kind Friend'; BOT_AVATAR_URL=''; botnameHead.textContent = 'Chatting with Kind Friend'; botAvatarTop.style.display='none';
-        meSpan.textContent = 'Not signed in';
-        openAuthBtn.style.display=''; logoutBtn.style.display='none'; editProfileBtn.style.display='none'; upgradeBtn.style.display='none'; billingBtn.style.display='none'; trialChip.style.display='none';
-      }
-    }
-
     // open auth from landing links
     (function(){ const p=new URLSearchParams(location.search); const m=p.get('mode'); const b=p.get('billing');
       if(b==='success'){ addBubble('Thank you! Your subscription is active. 💚 50% is donated to Samaritans.', 'bot'); }
@@ -1193,7 +1170,7 @@ INDEX_HTML = """<!doctype html>
       if(m){ openAuth(m); }
     })();
 
-    (async()=>{ await refreshAuth(); await loadSessions(); await loadHistory(); })();
+    (async()=>{ await refreshMe(); await loadSessions(); await loadHistory(); })();
   </script>
 </body>
 </html>
@@ -1203,6 +1180,9 @@ INDEX_HTML = """<!doctype html>
 # FastAPI app & middleware
 # =========================
 app = FastAPI()
+
+# Serve local images and assets from ./static at /static
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.exception_handler(Exception)
 async def all_exception_handler(request, exc):
@@ -1298,8 +1278,14 @@ async def api_me(request: Request):
     user = get_user_by_id(uid)
     if not user:
         resp = JSONResponse({"user": None}); clear_auth_cookie(resp); return resp
+
+    # update last_seen on each load (lightweight analytics)
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET last_seen=? WHERE id=?", (time.time(), user["id"]))
+        conn.commit()
+
     allowed, days_left = trial_info(user)
-    # emit check-in note if due (once per day)
     due, note = checkin_due_and_text(user)
     if due:
         mark_checkin_sent_today(user["id"], os.getenv("APP_TZ", "Europe/London"))
@@ -1318,8 +1304,6 @@ async def api_profile(request: Request):
     return JSONResponse({"ok": True})
 
 # ---- Tone APIs ----
-from pydantic import BaseModel
-
 class ToneIn(BaseModel):
     tone: str
 
@@ -1469,10 +1453,18 @@ async def api_chat_stream(request: Request):
     if not user_message: return JSONResponse({"error": "Empty message"}, status_code=400)
     sid = request.cookies.get("session_id") or create_session(uid, title="New chat")
 
+    # mark seen
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET last_seen=? WHERE id=?", (time.time(), uid))
+        conn.commit()
+
     guard = crisis_guard(user_message)
     if guard:
         save_message(sid, "user", user_message, uid); save_message(sid, "assistant", guard, uid)
-        def gen_safe(): yield "data: " + guard.replace("\n","\\n") + "\n\n"; yield "data: [DONE]\n\n"
+        def gen_safe():
+            yield "data: " + guard.replace("\\n","\\\\n") + "\\n\\n"
+            yield "data: [DONE]\\n\\n"
         resp = StreamingResponse(gen_safe(), media_type="text/event-stream"); resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90); return resp
 
     save_message(sid, "user", user_message, uid)
@@ -1489,17 +1481,14 @@ async def api_chat_stream(request: Request):
     hint = time_context_hint(user_message)
     if hint:
         history.append({"role": "system", "content": hint})
-
     mem_lines = get_context_memories(uid, max_items=8)
     if mem_lines:
-        history.append({"role":"system","content": "Known user context:\n" + "\n".join(mem_lines)})
-
+        history.append({"role":"system","content": "Known user context:\\n" + "\\n".join(mem_lines)})
     history.extend(get_recent_messages(sid, 20))
     history.append({"role":"user","content":user_message})
 
     mem_suggestions = suggest_memories_from_text(user_message)
 
-    # Check-in note (emit once per day, before tokens)
     due, note = checkin_due_and_text(user)
     if due:
         mark_checkin_sent_today(user["id"], os.getenv("APP_TZ", "Europe/London"))
@@ -1508,27 +1497,28 @@ async def api_chat_stream(request: Request):
         try:
             if mem_suggestions:
                 payload = json.dumps({"type":"mem_suggest","items":mem_suggestions})
-                yield "data: __KF_MEM__:" + payload + "\n\n"
+                yield "data: __KF_MEM__:" + payload + "\\n\\n"
             if due and note:
-                yield "data: __KF_NOTE__:" + json.dumps({"text": note}) + "\n\n"
+                yield "data: __KF_NOTE__:" + json.dumps({"text": note}) + "\\n\\n"
 
             stream = client.chat.completions.create(model=MODEL_NAME, messages=history, temperature=0.7, stream=True)
             parts = []
             for chunk in stream:
                 delta = None
-                try: delta = chunk.choices[0].delta.content
+                try:
+                    delta = chunk.choices[0].delta.content
                 except Exception:
                     try: delta = chunk.choices[0].message.content
                     except Exception: delta = None
                 if not delta: continue
                 parts.append(delta)
-                yield "data: " + delta.replace("\n","\\n") + "\n\n"
+                yield "data: " + delta.replace("\\n","\\\\n") + "\\n\\n"
             final = "".join(parts)
             save_message(sid, "assistant", final, uid)
-            yield "data: [DONE]\n\n"
+            yield "data: [DONE]\\n\\n"
         except Exception as e:
-            yield "data: " + ("[Error] " + str(e)).replace("\n","\\n") + "\n\n"
-            yield "data: [DONE]\n\n"
+            yield "data: " + ("[Error] " + str(e)).replace("\\n","\\\\n") + "\\n\\n"
+            yield "data: [DONE]\\n\\n"
 
     resp = StreamingResponse(event_stream(), media_type="text/event-stream")
     resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
@@ -1547,6 +1537,12 @@ async def api_chat(request: Request):
     d = await request.json(); user_message = (d.get("message") or "").strip()
     if not user_message: return JSONResponse({"error": "Empty message"}, status_code=400)
     sid = request.cookies.get("session_id") or create_session(uid, title="New chat")
+
+    # mark seen
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET last_seen=? WHERE id=?", (time.time(), uid))
+        conn.commit()
 
     guard = crisis_guard(user_message)
     if guard:
@@ -1569,7 +1565,7 @@ async def api_chat(request: Request):
         history.append({"role": "system", "content": hint})
     mem_lines = get_context_memories(uid, max_items=8)
     if mem_lines:
-        history.append({"role":"system","content": "Known user context:\n" + "\n".join(mem_lines)})
+        history.append({"role":"system","content": "Known user context:\\n" + "\\n".join(mem_lines)})
     history.extend(get_recent_messages(sid, 20))
     history.append({"role":"user","content": user_message})
 
@@ -1662,3 +1658,4 @@ async def stripe_webhook(request: Request):
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor(); cur.execute("UPDATE users SET subscription_status=? WHERE stripe_customer_id=?", (status, customer_id)); conn.commit()
     return PlainTextResponse("ok", status_code=200)
+
