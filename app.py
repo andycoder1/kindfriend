@@ -1,811 +1,972 @@
-import os, sys, time, uuid, io, csv, json, datetime, sqlite3
-from typing import Optional
-from zoneinfo import ZoneInfo
+# app.py
+import os
+import io
+import csv
+import json
+import stripe
+import sqlite3
+from datetime import datetime, date
+from typing import Optional, List, Dict, Any, Tuple
 
-from fastapi import FastAPI, Request, Query, Response
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Request, Form, Query, Header
+from fastapi.responses import (
+    HTMLResponse, RedirectResponse, PlainTextResponse,
+    JSONResponse, Response
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
-# ---------- Password hashing ----------
+# ============== Config & Clients ==============
+APP_NAME = "Coffee Chat — A Simple Companion App"
+
+# OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL_FREE = os.getenv("OPENAI_MODEL_FREE", "gpt-4o-mini")
+OPENAI_MODEL_PLUS = os.getenv("OPENAI_MODEL_PLUS", "gpt-4o-mini")
+OPENAI_MODEL_PRO  = os.getenv("OPENAI_MODEL_PRO",  "gpt-4o")
+
+# Stripe
+STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_PLUS      = os.getenv("STRIPE_PRICE_PLUS")  # £4.99
+STRIPE_PRICE_PRO       = os.getenv("STRIPE_PRICE_PRO")   # £7.99
+PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+# FastAPI
+app = FastAPI(title=APP_NAME)
+SECRET_KEY = os.getenv("APP_SECRET_KEY", "dev-secret-change-me")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # tighten for prod
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ============== Password hashing ==============
 try:
     import bcrypt
     def hash_password(p: str) -> str:
         return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
     def check_password(p: str, h: str) -> bool:
-        return bcrypt.checkpw(p.encode(), h.encode())
+        try:
+            return bcrypt.checkpw(p.encode(), h.encode())
+        except Exception:
+            return False
 except Exception:
     import hashlib
-    print("⚠ bcrypt not found — using SHA256 fallback (dev only).", file=sys.stderr)
+    print("⚠ bcrypt not found — using SHA256 fallback (dev only)")
     def hash_password(p: str) -> str:
         return hashlib.sha256(p.encode()).hexdigest()
     def check_password(p: str, h: str) -> bool:
         return hashlib.sha256(p.encode()).hexdigest() == h
 
-from itsdangerous import URLSafeSerializer, BadSignature
+# ============== DB ==============
+DB_PATH = os.getenv("APP_DB_PATH", "app.db")
 
-# ---------- OpenAI ----------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-if not OPENAI_API_KEY:
-    print("❌ OPENAI_API_KEY not set.", file=sys.stderr)
-    API_AVAILABLE = False
-    client = None
-else:
-    API_AVAILABLE = True
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as e:
-        print(f"❌ Failed to init OpenAI client: {e}", file=sys.stderr)
-        API_AVAILABLE = False
-        client = None
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# ---------- App config ----------
-DATA_DIR = os.getenv("DATA_DIR", "")
-DB_FILE = os.path.join(DATA_DIR, "kindfriend.db") if DATA_DIR else "kindfriend.db"
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
-AUTH_COOKIE = "kf_auth"
+def table_has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(c["name"] == col for c in cols)
 
-# ---------- System prompt ----------
-SYSTEM_PROMPT = (
-    "You are Kind Friend: a warm, respectful companion whose display name is set by the user. "
-    "You are not a therapist. If the user mentions self-harm or danger, suggest UK Samaritans (116 123), "
-    "NHS 111, or 999 in an emergency. Consider local time and recent context (e.g., acknowledge late hours). "
-    "Be kind, concise, and supportive."
-)
-
-# ---------- DB init ----------
 def init_db():
-    if DATA_DIR:
-        os.makedirs(DATA_DIR, exist_ok=True)
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("""
+    conn = db(); cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             display_name TEXT,
-            created_at REAL NOT NULL
-        )""")
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT,
-            title TEXT,
-            created_at REAL NOT NULL
-        )""")
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
+            stripe_customer_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT DEFAULT 'UTC',
+            dark_mode INTEGER DEFAULT 0,
+            notifications INTEGER DEFAULT 1,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
             content TEXT NOT NULL,
-            ts REAL NOT NULL
-        )""")
-        conn.commit()
+            mood TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    # Subscriptions
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            plan TEXT NOT NULL DEFAULT 'free',              -- free | plus | pro
+            stripe_subscription_id TEXT,
+            status TEXT,                                    -- active, trialing, past_due, canceled, unpaid, incomplete, incomplete_expired
+            current_period_end TEXT,
+            started_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit(); conn.close()
 init_db()
 
-# ---------- DB helpers ----------
-def create_user(username: str, password: str):
-    uid = str(uuid.uuid4())
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO users (id, username, password_hash, display_name, created_at) VALUES (?,?,?,?,?)",
-            (uid, username, hash_password(password), username, time.time()),
-        )
-        conn.commit()
-    return uid
-
-def get_user_by_username(username: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT id, username, password_hash, display_name FROM users WHERE username=?", (username,))
-        r = c.fetchone()
-    if not r: return None
-    return {"id": r[0], "username": r[1], "password_hash": r[2], "display_name": r[3]}
-
-def get_user_by_id(uid: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT id, username, password_hash, display_name FROM users WHERE id=?", (uid,))
-        r = c.fetchone()
-    if not r: return None
-    return {"id": r[0], "username": r[1], "password_hash": r[2], "display_name": r[3]}
-
-def create_session(user_id: Optional[str], title: str = "New chat") -> str:
-    sid = str(uuid.uuid4())
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO sessions (id, user_id, title, created_at) VALUES (?,?,?,?)",
-                  (sid, user_id, title, time.time()))
-        conn.commit()
-    return sid
-
-def list_sessions(user_id: Optional[str]):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        if user_id:
-            c.execute("SELECT id, title, created_at FROM sessions WHERE user_id=? ORDER BY created_at DESC", (user_id,))
-        else:
-            c.execute("SELECT id, title, created_at FROM sessions WHERE user_id IS NULL ORDER BY created_at DESC")
-        rows = c.fetchall()
-    return [{"id": i, "title": t, "created_at": ts} for (i, t, ts) in rows]
-
-def save_message(session_id: str, role: str, content: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?,?,?,?)",
-                  (session_id, role, content, time.time()))
-        conn.commit()
-
-def get_recent_messages(session_id: str, limit: int = 20):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY ts DESC LIMIT ?", (session_id, limit))
-        rows = c.fetchall()
-    rows.reverse()
-    return [{"role": r, "content": c} for (r, c) in rows]
-
-def get_all_messages(session_id: str):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (session_id,))
-        return c.fetchall()
-
-# ---------- Auth cookie ----------
-signer = URLSafeSerializer(SECRET_KEY, salt="kf-auth")
-
-def set_auth_cookie(resp: Response, user_id: str):
-    token = signer.dumps({"user_id": user_id, "ts": time.time()})
-    resp.set_cookie(AUTH_COOKIE, token, httponly=True, samesite="Lax", max_age=60*60*24*180)
-
-def clear_auth_cookie(resp: Response):
-    resp.delete_cookie(AUTH_COOKIE)
-
-def get_current_user_id(request: Request) -> Optional[str]:
-    token = request.cookies.get(AUTH_COOKIE)
-    if not token: return None
-    try:
-        data = signer.loads(token)
-        return data.get("user_id")
-    except BadSignature:
-        return None
-
-# ---------- HTML ----------
-LANDING_HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Kind Friend — A kinder AI companion</title>
-  <link rel="icon" href="/static/favicon.ico">
-  <style>
-    body { margin:0; font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial; background:#f4fdf6; color:#333; text-align:center; }
-    header { background:#25d366; color:#fff; padding:2rem 1rem; }
-    header h1 { margin:0; font-size:2.4rem; }
-    header p { margin:.5rem 0 0; font-size:1.15rem; }
-    .hero img { max-width:820px; width:92%; height:auto; margin:2rem auto; border-radius:16px; box-shadow:0 4px 12px rgba(0,0,0,0.1); }
-    .features { display:flex; flex-wrap:wrap; justify-content:center; margin:1rem auto 2rem; gap:1rem; max-width:1100px; }
-    .feature { flex:1 1 260px; background:#fff; border-radius:16px; padding:1.2rem; box-shadow:0 4px 8px rgba(0,0,0,0.05); }
-    .feature img { width:48px; height:48px; margin-bottom: .6rem; }
-    .cta { margin:2rem 0 3rem; display:flex; gap:.8rem; justify-content:center; flex-wrap:wrap; }
-    .btn { background:#25d366; border:none; color:#fff; padding:1rem 1.6rem; border-radius:999px; cursor:pointer; font-weight:700; }
-    .btn.alt { background:#fff; color:#0b1b21; border:1px solid #d1d7db; }
-    footer { margin: 2rem 0; color:#666; font-size:.95rem; }
-    footer img { height:24px; vertical-align:middle; margin-left:8px; }
-  </style>
-</head>
-<body>
-<header>
-  <h1>Kind Friend</h1>
-  <p>Your friendly chat companion, always here to listen</p>
-</header>
-
-<div class="hero">
-  <img src="/static/coffee_chat.jpg" alt="People chatting over coffee">
-</div>
-
-<section class="features">
-  <div class="feature">
-    <img src="/static/icon_chat.svg" alt="Chat bubble">
-    <h3>Natural Conversations</h3>
-    <p>A familiar, friendly chat interface that feels easy and welcoming.</p>
-  </div>
-  <div class="feature">
-    <img src="/static/icon_lock.svg" alt="Privacy">
-    <h3>Private & Secure</h3>
-    <p>You control what’s remembered. View and delete memories any time.</p>
-  </div>
-  <div class="feature">
-    <img src="/static/icon_heart.svg" alt="Support">
-    <h3>Supporting Good Causes</h3>
-    <p>We donate 50% of all subscription fees directly to Samaritans.</p>
-  </div>
-</section>
-
-<div class="cta">
-  <button class="btn" onclick="window.location.href='/app?mode=signup'">Try free for 7 days</button>
-  <button class="btn alt" onclick="window.location.href='/app?mode=login'">Log in</button>
-</div>
-
-<footer>
-  © 2025 Kind Friend • Bringing kindness to every conversation
-  <br>
-  <span>In proud support of</span>
-  <img src="/static/samaritans_logo.png" alt="Samaritans">
-</footer>
-</body>
-</html>
-"""
-
-INDEX_HTML = r"""<!doctype html>
-<html lang="en" data-theme="light">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kind Friend</title>
-  <link rel="icon" href="/static/favicon.ico">
-  <style>
-    :root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--chatbg:#e7f0ea;--me:#d9fdd3;--bot:#ffffff;--br:#d1d7db;--panel:#ffffff;--shadow:0 6px 24px rgba(0,0,0,.12)}
-    *{box-sizing:border-box} html,body{height:100%;margin:0}
-    body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg)}
-    .topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,var(--gd),var(--g));color:#fff;box-shadow:var(--shadow)}
-    .logo{width:36px;height:36px;border-radius:10px;background:var(--acc);display:grid;place-items:center;color:#073;font-weight:800}
-    .brand{font-weight:800;letter-spacing:.2px}.grow{flex:1 1 auto}
-    .chip{font-size:12px;color:#eafff0;background:rgba(255,255,255,.15);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.25)}
-    #trial-chip{display:none}
-    .tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
-    .tb-btn.primary{background:#fff;color:#073}
-    .app{display:grid;grid-template-columns:360px 1fr;height:100svh;overflow:hidden}
-    @media (max-width:1000px){.app{grid-template-columns:1fr}.sidebar{display:none}}
-    .sidebar{display:flex;flex-direction:column;height:calc(100svh - 60px);border-right:1px solid var(--br);background:var(--panel)}
-    .side-head{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--br)}
-    .side-actions{display:flex;gap:8px;padding:12px}
-    .list{overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:8px}
-    .item{padding:10px 12px;background:#fff;border:1px solid var(--br);border-radius:12px;cursor:pointer}
-    .item.active{outline:2px solid var(--acc)}
-    .main{display:flex;flex-direction:column;height:calc(100svh - 60px);background:var(--chatbg);position:relative}
-    .chatbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--br);background:var(--panel);padding:10px 12px}
-    .chat{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 16px;display:grid;gap:8px}
-    .row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:end}
-    .row.user{grid-template-columns:1fr auto}.row.user .avatar{display:none}
-    .avatar{width:28px;height:28px;border-radius:50%;overflow:hidden;display:grid;place-items:center;color:#fff;background:var(--g);font-weight:800}
-    .avatar img{width:100%;height:100%;object-fit:cover}
-    .bubble{max-width:70ch;padding:10px 12px;border-radius:16px;color:var(--txt);position:relative;white-space:pre-wrap;word-wrap:anywhere;box-shadow:0 1px 0 rgba(0,0,0,.08);border:1px solid var(--br)}
-    .row.user .bubble{background:var(--me)} .row.bot .bubble{background:var(--bot)}
-    .row.user .bubble::after{content:"";position:absolute;right:-6px;bottom:0;width:12px;height:12px;background:var(--me);clip-path:polygon(0 0,100% 100%,0 100%);border-right:1px solid var(--br);border-bottom:1px solid var(--br)}
-    .row.bot .bubble::before{content:"";position:absolute;left:-6px;bottom:0;width:12px;height:12px;background:var(--bot);clip-path:polygon(0 100%,100% 0,100% 100%);border-left:1px solid var(--br);border-bottom:1px solid var(--br)}
-    .meta{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:11px;margin-top:4px}
-    .composer{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px;border-top:1px solid var(--br);background:var(--panel)}
-    .input{padding:12px 14px;border-radius:999px;border:1px solid var(--br);background:#fff;color:var(--txt)}
-    .send{background:var(--g);color:#fff;border:none;padding:10px 16px;border-radius:999px;cursor:pointer}
-    .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40}
-    .modal{display:none;position:fixed;inset:0;z-index:50;place-items:center}
-    .modal.on,.modal-backdrop.on{display:grid}
-    .modal-card{width:min(560px,94vw);background:#fff;color:var(--txt);border:1px solid var(--br);border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:16px}
-    .modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-    .modal-title{font-weight:800;font-size:16px}
-    .xbtn{border:1px solid var(--br);background:#fff;color:var(--txt);border-radius:10px;padding:6px 10px;cursor:pointer}
-    .form-row{display:grid;gap:6px;margin:10px 0}
-    .form-row input{padding:10px 12px;border-radius:12px;border:1px solid var(--br);background:#fff;color:var(--txt)}
-    .form-actions{display:flex;gap:8px;justify-content:flex-end}
-  </style>
-</head>
-<body>
-  <div class="topbar">
-    <div class="logo">KF</div>
-    <div class="brand">Kind Friend · <span id="botname-head">Chatting with Kind Friend</span></div>
-    <div class="grow"></div>
-    <span class="chip" id="me">Not signed in</span>
-    <span class="chip" id="trial-chip" style="display:none;"></span>
-    <button id="download-txt" class="tb-btn">.txt</button>
-    <button id="download-csv" class="tb-btn">.csv</button>
-  </div>
-
-  <div class="app">
-    <aside class="sidebar">
-      <div class="side-head"><div style="font-weight:700;">Chats</div></div>
-      <div class="side-actions">
-        <button id="new-chat" class="tb-btn primary">New chat</button>
-      </div>
-      <div class="list" id="sessions"></div>
-    </aside>
-
-    <main class="main">
-      <div class="chatbar">
-        <div class="auth" id="auth" style="display:flex;gap:8px;align-items:center;">
-          <button id="open-auth" class="tb-btn primary">Sign in / up</button>
-          <button id="logout" class="tb-btn" style="display:none;">Log out</button>
-        </div>
-      </div>
-
-      <section class="chat" id="chat"></section>
-
-      <div class="composer">
-        <input id="message" class="input" autocomplete="off" placeholder="Sign in to start chatting" disabled />
-        <button id="send" class="send" disabled>Send</button>
-      </div>
-    </main>
-  </div>
-
-  <!-- Auth Modal -->
-  <div class="modal-backdrop" id="auth-backdrop"></div>
-  <div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-    <div class="modal-card">
-      <div class="modal-header">
-        <div class="modal-title" id="auth-title">Welcome to Kind Friend</div>
-        <button class="xbtn" id="auth-close">Close</button>
-      </div>
-      <div class="tabs" style="display:flex;gap:8px;margin-bottom:8px;">
-        <button id="tab-login"  class="tb-btn" aria-selected="true">Log in</button>
-        <button id="tab-signup" class="tb-btn">Sign up</button>
-      </div>
-      <div id="pane-login">
-        <div class="form-row"><label for="login-username">Username</label><input id="login-username" placeholder="yourname"/></div>
-        <div class="form-row"><label for="login-password">Password</label><input id="login-password" type="password" placeholder="••••••••"/></div>
-        <div class="form-actions">
-          <button class="xbtn" id="login-cancel">Cancel</button>
-          <button class="tb-btn primary" id="login-submit">Log in</button>
-        </div>
-      </div>
-      <div id="pane-signup" style="display:none;">
-        <div class="form-row"><label for="signup-username">Username</label><input id="signup-username" placeholder="yourname"/></div>
-        <div class="form-row"><label for="signup-password">Password</label><input id="signup-password" type="password" placeholder="Create a password"/></div>
-        <div class="form-actions">
-          <button class="xbtn" id="signup-cancel">Cancel</button>
-          <button class="tb-btn primary" id="signup-submit">Create account</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-  // ---------- chat helpers ----------
-  const chat    = document.getElementById('chat');
-  const input   = document.getElementById('message');
-  const send    = document.getElementById('send');
-  const sessionsEl = document.getElementById('sessions');
-  const meSpan  = document.getElementById('me');
-  const trialChip = document.getElementById('trial-chip');
-
-  function md(x){
-    // Basic HTML escape
-    const esc = x.replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
-    // Linkify URLs
-    const withLinks = esc.replace(/(https?:\/\/\S+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-    // Preserve newlines
-    return withLinks.replace(/\n/g, '<br/>');
-  }
-
-  function addBubble(text, who){
-    const row = document.createElement('div');
-    row.className = 'row ' + who;
-
-    const av = document.createElement('div');
-    av.className = 'avatar';
-    av.textContent = (who === 'bot' ? 'KF' : 'You');
-
-    const b = document.createElement('div');
-    b.className = 'bubble';
-    b.innerHTML = md(text);
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-
-    if (who === 'bot') {
-      row.appendChild(av);
-      const wrap = document.createElement('div');
-      wrap.appendChild(b); wrap.appendChild(meta);
-      row.appendChild(wrap);
-    } else {
-      const wrap = document.createElement('div');
-      wrap.appendChild(b); wrap.appendChild(meta);
-      row.appendChild(wrap);
-      row.style.gridTemplateColumns = '1fr auto';
-    }
-
-    chat.appendChild(row);
-    chat.scrollTop = chat.scrollHeight;
-  }
-
-  function makeBotBubble(initial='…'){
-    const row = document.createElement('div'); row.className='row bot';
-    const av  = document.createElement('div'); av.className='avatar'; av.textContent='KF';
-    const b   = document.createElement('div'); b.className='bubble'; b.textContent=initial;
-    const meta= document.createElement('div'); meta.className='meta';
-    meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    row.appendChild(av);
-    const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta);
-    row.appendChild(wrap);
-    chat.appendChild(row); chat.scrollTop=chat.scrollHeight;
-    return b;
-  }
-
-  // ---------- Auth modal wiring (single declarations; no duplicates) ----------
-  const authModal     = document.getElementById('auth-modal');
-  const authBackdrop  = document.getElementById('auth-backdrop');
-  const authClose     = document.getElementById('auth-close');
-  const tabLogin      = document.getElementById('tab-login');
-  const tabSignup     = document.getElementById('tab-signup');
-  const paneLogin     = document.getElementById('pane-login');
-  const paneSignup    = document.getElementById('pane-signup');
-
-  const loginUsername = document.getElementById('login-username');
-  const loginPassword = document.getElementById('login-password');
-  const loginSubmit   = document.getElementById('login-submit');
-  const loginCancel   = document.getElementById('login-cancel');
-
-  const signupUsername = document.getElementById('signup-username');
-  const signupPassword = document.getElementById('signup-password');
-  const signupSubmit   = document.getElementById('signup-submit');
-  const signupCancel   = document.getElementById('signup-cancel');
-
-  function showLogin(){
-    paneLogin.style.display=''; paneSignup.style.display='none';
-    tabLogin.classList.add('primary'); tabSignup.classList.remove('primary');
-    tabLogin.setAttribute('aria-selected','true'); tabSignup.setAttribute('aria-selected','false');
-  }
-  function showSignup(){
-    paneLogin.style.display='none'; paneSignup.style.display='';
-    tabSignup.classList.add('primary'); tabLogin.classList.remove('primary');
-    tabLogin.setAttribute('aria-selected','false'); tabSignup.setAttribute('aria-selected','true');
-  }
-  function openAuth(which='login'){
-    authModal.classList.add('on'); authBackdrop.classList.add('on');
-    (which==='signup' ? showSignup() : showLogin());
-    setTimeout(()=>{ (which==='signup' ? signupUsername : loginUsername).focus(); }, 50);
-  }
-  function closeAuth(){ authModal.classList.remove('on'); authBackdrop.classList.remove('on'); }
-
-  document.getElementById('open-auth').onclick = ()=>openAuth('login');
-  authClose.onclick = closeAuth; authBackdrop.onclick = closeAuth;
-  loginCancel.onclick = closeAuth; signupCancel.onclick = closeAuth;
-  tabLogin.onclick = showLogin; tabSignup.onclick = showSignup;
-
-  async function refreshMe(){
-    const r = await fetch('/api/me'); const data = await r.json();
-    if(data.user){
-      input.disabled=false; send.disabled=false; input.placeholder="Type a message";
-      meSpan.textContent = `Signed in as ${data.user.display_name || data.user.username}`;
-      document.getElementById('open-auth').style.display='none';
-      document.getElementById('logout').style.display='';
-    } else {
-      input.disabled=true; send.disabled=true; input.placeholder="Sign in to start chatting";
-      meSpan.textContent = "Not signed in";
-      document.getElementById('open-auth').style.display='';
-      document.getElementById('logout').style.display='none';
-    }
-  }
-
-  loginSubmit.onclick = async ()=>{
-    const username = loginUsername.value.trim();
-    const password = loginPassword.value;
-    if(!username || !password) return alert('Enter username & password');
-    const r = await fetch('/api/login',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username,password})
-    });
-    const d = await r.json();
-    if(!r.ok) return alert(d.error||'Login failed');
-    await refreshMe(); addBubble('Signed in.','bot'); loadSessions(); loadHistory(); closeAuth();
-  };
-
-  signupSubmit.onclick = async ()=>{
-    const username = signupUsername.value.trim();
-    const password = signupPassword.value;
-    if(!username || !password) return alert('Enter username & password');
-    const r = await fetch('/api/register',{
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({username,password})
-    });
-    const d = await r.json();
-    if(!r.ok) return alert(d.error||'Signup failed');
-    await refreshMe(); addBubble('Account created and signed in. 👋','bot'); loadSessions(); loadHistory(); closeAuth();
-  };
-
-  document.getElementById('logout').onclick = async ()=>{
-    await fetch('/api/logout',{method:'POST'});
-    await refreshMe(); addBubble('Signed out.','bot'); loadSessions(); chat.innerHTML='';
-  };
-
-  // ---------- sessions & history ----------
-  async function loadSessions(){
-    const r = await fetch('/api/sessions'); const data = await r.json();
-    sessionsEl.innerHTML='';
-    (data.sessions || []).forEach(s=>{
-      const el = document.createElement('div');
-      el.className = 'item' + (data.active === s.id ? ' active' : '');
-      el.textContent = s.title || 'Untitled';
-      el.onclick = async ()=>{
-        await fetch('/api/session/select',{
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({session_id:s.id})
-        });
-        await loadHistory(); await loadSessions();
-      };
-      sessionsEl.appendChild(el);
-    });
-  }
-
-  async function loadHistory(){
-    const r = await fetch('/api/history'); const data = await r.json();
-    chat.innerHTML='';
-    (data.messages || []).forEach(m => addBubble(m.content, m.role === 'assistant' ? 'bot' : 'user'));
-  }
-
-  // ---------- send message (SSE stream) ----------
-  async function sendMessage(){
-    const msg = input.value.trim(); if(!msg) return;
-    input.value=''; addBubble(msg,'user');
-
-    const res = await fetch('/api/chat/stream', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({message: msg})
-    });
-
-    if(res.status === 401){ openAuth('login'); return; }
-    if(!res.ok){ addBubble('Error: ' + (await res.text()), 'bot'); return; }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf='', acc='';
-    const bubbleEl = makeBotBubble('…');
-
-    while(true){
-      const {value, done} = await reader.read();
-      if(done) break;
-      buf += decoder.decode(value, {stream:true});
-      const parts = buf.split("\n\n");  // SSE chunks
-      buf = parts.pop() || '';
-      for(const part of parts){
-        if(!part.startsWith('data:')) continue;
-        const raw = part.slice(5);
-        if(raw.trim() === '[DONE]') continue;
-        const chunk = raw.replace(/\\n/g, '\n');
-        acc += chunk;
-        bubbleEl.innerHTML = md(acc);
-        chat.scrollTop = chat.scrollHeight;
-      }
-    }
-  }
-
-  send.onclick = sendMessage;
-  input.addEventListener('keydown', e=>{
-    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); }
-  });
-
-  // ---------- new chat & export ----------
-  document.getElementById('new-chat').onclick = async ()=>{
-    const title = prompt('Name your chat (optional):','New chat') || 'New chat';
-    const r = await fetch('/api/sessions', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({title})
-    });
-    if(r.ok){ await loadSessions(); await loadHistory(); }
-  };
-
-  document.getElementById('download-txt').onclick = ()=>{ window.location='/api/export?fmt=txt'; };
-  document.getElementById('download-csv').onclick = ()=>{ window.location='/api/export?fmt=csv'; };
-
-  // ---------- boot (supports /app?mode=signup|login) ----------
-  document.addEventListener('DOMContentLoaded', async () => {
-    await refreshMe();
-    await loadSessions();
-    await loadHistory();
-
-    const params = new URLSearchParams(window.location.search);
-    const mode = params.get('mode');
-    if (mode === 'signup' || mode === 'login') {
-      openAuth(mode);
-      // Clean the URL so refresh/back doesn’t reopen the modal
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState({}, '', '/app');
-      }
-    }
-  });
-</script>
-
-</body>
-</html>
-"""
-
-# ---------- FastAPI app ----------
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/", response_class=HTMLResponse)
-async def landing():
-    return HTMLResponse(LANDING_HTML)
-
-@app.head("/")
-async def head_root():
-    return Response(status_code=200)
-
-@app.get("/app", response_class=HTMLResponse)
-async def app_index():
-    return HTMLResponse(INDEX_HTML)
-
-@app.head("/app")
-async def head_app():
-    return Response(status_code=200)
-
-@app.get("/health")
-async def health():
-    return JSONResponse({"ok": True, "api_available": API_AVAILABLE, "db_path": DB_FILE, "db_exists": os.path.exists(DB_FILE)})
-
-# ---------- Auth APIs ----------
-@app.post("/api/register")
-async def api_register(request: Request):
-    d = await request.json()
-    username = (d.get("username") or "").strip().lower()
-    password = d.get("password") or ""
-    if not username or not password:
-        return JSONResponse({"error": "Username and password required"}, status_code=400)
-    if get_user_by_username(username):
-        return JSONResponse({"error": "Username already taken"}, status_code=409)
-    uid = create_user(username, password)
-    sid = create_session(uid, title="Welcome")
-    resp = JSONResponse({"ok": True, "user_id": uid, "session_id": sid})
-    set_auth_cookie(resp, uid)
-    resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-    return resp
-
-@app.post("/api/login")
-async def api_login(request: Request):
-    d = await request.json()
-    username = (d.get("username") or "").strip().lower()
-    password = d.get("password") or ""
-    user = get_user_by_username(username)
-    if not user or not check_password(password, user["password_hash"]):
-        return JSONResponse({"error": "Invalid credentials"}, status_code=401)
-    sessions = list_sessions(user["id"])
-    sid = sessions[0]["id"] if sessions else create_session(user["id"], title="New chat")
-    resp = JSONResponse({"ok": True, "session_id": sid})
-    set_auth_cookie(resp, user["id"])
-    resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-    return resp
-
-@app.post("/api/logout")
-async def api_logout():
-    resp = JSONResponse({"ok": True})
-    clear_auth_cookie(resp)
-    return resp
-
-@app.get("/api/me")
-async def api_me(request: Request):
-    uid = get_current_user_id(request)
-    if not uid:
-        return JSONResponse({"user": None})
-    user = get_user_by_id(uid)
-    if not user:
-        resp = JSONResponse({"user": None}); clear_auth_cookie(resp); return resp
-    return JSONResponse({"user": {"id": user["id"], "username": user["username"], "display_name": user["display_name"]}})
-
-# ---------- Sessions & history ----------
-@app.get("/api/sessions")
-async def api_sessions(request: Request):
-    uid = get_current_user_id(request)
-    sessions = list_sessions(uid)
-    active = request.cookies.get("session_id")
-    return JSONResponse({"sessions": sessions, "active": active})
-
-@app.post("/api/sessions")
-async def api_sessions_create(request: Request):
-    uid = get_current_user_id(request)
-    d = await request.json()
-    title = (d.get("title") or "New chat").strip() or "New chat"
-    sid = create_session(uid, title=title)
-    resp = JSONResponse({"ok": True, "session_id": sid})
-    resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-    return resp
-
-@app.post("/api/session/select")
-async def api_session_select(request: Request):
-    d = await request.json()
-    sid = d.get("session_id")
-    if not sid: return JSONResponse({"error": "session_id required"}, status_code=400)
-    resp = JSONResponse({"ok": True})
-    resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-    return resp
-
-@app.get("/api/history")
-async def api_history(request: Request):
-    sid = request.cookies.get("session_id")
-    if not sid: return JSONResponse({"messages": [], "session_id": None})
-    msgs = get_all_messages(sid)
-    out = [{"role": r, "content": c, "ts": ts} for (r, c, ts) in msgs]
-    return JSONResponse({"messages": out, "session_id": sid})
-
-# ---------- Chat (SSE stream) ----------
-def crisis_guard(text: str) -> Optional[str]:
-    lowered = text.lower()
-    for k in ["suicide","kill myself","self-harm","end my life","overdose","hurt myself"]:
-        if k in lowered:
-            return ("I'm really glad you reached out. You deserve support.\n\n"
-                    "If you're in the UK, you can call **Samaritans 116 123** any time, or visit A&E / call **999** in an emergency.\n"
-                    "I'm here to keep you company, but I'm not a substitute for professional help.")
+# ============== Plans ==============
+PLANS = {
+    "free": {
+        "name": "Free",
+        "price": "£0",
+        "chat_daily": 15,
+        "memory_limit": 100,
+        "allow_search": False,
+        "allow_export": False,
+        "allow_mood": False,
+        "model": OPENAI_MODEL_FREE,
+        "max_tokens": 300,
+        "context_notes": 4,
+    },
+    "plus": {
+        "name": "Plus",
+        "price": "£4.99/mo",
+        "chat_daily": 200,
+        "memory_limit": 1000,
+        "allow_search": True,
+        "allow_export": True,
+        "allow_mood": True,
+        "model": OPENAI_MODEL_PLUS,
+        "max_tokens": 800,
+        "context_notes": 8,
+    },
+    "pro": {
+        "name": "Pro",
+        "price": "£7.99/mo",
+        "chat_daily": 2000,
+        "memory_limit": 10000,
+        "allow_search": True,
+        "allow_export": True,
+        "allow_mood": True,
+        "model": OPENAI_MODEL_PRO,
+        "max_tokens": 2000,
+        "context_notes": 12,
+    },
+}
+PRICE_TO_PLAN = {}  # filled after startup from env
+
+def env_prices_loaded() -> bool:
+    return bool(STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO)
+
+# ============== Session / helpers ==============
+def current_user_id(request: Request) -> Optional[int]:
+    return request.session.get("user_id")
+
+def require_login(request: Request) -> Optional[RedirectResponse]:
+    if not current_user_id(request):
+        return RedirectResponse(url="/login", status_code=303)
     return None
 
-def current_time_note():
-    tz_name = os.getenv("APP_TZ", "Europe/London")
-    now_local = datetime.datetime.now(ZoneInfo(tz_name))
-    return f"Today is {now_local.strftime('%A %d %B %Y')} and the local time is {now_local.strftime('%H:%M')} in {tz_name}."
+def get_user(uid: int) -> Optional[sqlite3.Row]:
+    if not uid: return None
+    conn = db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    conn.close()
+    return user
 
-@app.post("/api/chat/stream")
-async def api_chat_stream(request: Request):
-    if not API_AVAILABLE: return JSONResponse({"error": "Service is not configured with an API key."}, status_code=500)
-    d = await request.json()
-    msg = (d.get("message") or "").strip()
-    if not msg: return JSONResponse({"error": "Empty message"}, status_code=400)
-    uid = get_current_user_id(request)
-    sid = request.cookies.get("session_id") or create_session(uid, title="New chat")
+def ensure_subscription_row(uid: int):
+    conn = db()
+    row = conn.execute("SELECT user_id FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()
+    if not row:
+        conn.execute(
+            "INSERT INTO subscriptions (user_id, plan, status, started_at) VALUES (?, 'free', 'active', ?)",
+            (uid, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    conn.close()
 
-    guard = crisis_guard(msg)
-    save_message(sid, "user", msg)
-    if guard:
-        save_message(sid, "assistant", guard)
-        def gen_safe():
-            yield "data: " + guard.replace("\n","\\n") + "\n\n"
-            yield "data: [DONE]\n\n"
-        resp = StreamingResponse(gen_safe(), media_type="text/event-stream")
-        resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-        return resp
+def set_plan(uid: int, plan: str, sub_id: Optional[str] = None, status: Optional[str] = None, cpe: Optional[int] = None):
+    if plan not in PLANS: plan = "free"
+    conn = db()
+    conn.execute("""
+        INSERT INTO subscriptions (user_id, plan, stripe_subscription_id, status, current_period_end, started_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET plan=excluded.plan,
+                      stripe_subscription_id=excluded.stripe_subscription_id,
+                      status=excluded.status,
+                      current_period_end=excluded.current_period_end
+    """, (uid, plan, sub_id, status, (str(cpe) if cpe else None), datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
 
-    history = [{"role":"system","content":SYSTEM_PROMPT},
-               {"role":"system","content":current_time_note()}]
-    history.extend(get_recent_messages(sid, 20))
-    history.append({"role":"user","content":msg})
+def get_subscription(uid: int) -> str:
+    conn = db()
+    row = conn.execute("SELECT plan, status FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()
+    conn.close()
+    # Treat inactive/ended subs as free
+    if not row: return "free"
+    plan, status = row["plan"], (row["status"] or "")
+    if plan in ("plus", "pro") and status not in ("active", "trialing", "past_due"):
+        return "free"
+    return plan if plan in PLANS else "free"
 
-    def stream():
+def plan_cfg(uid: int) -> Tuple[str, Dict[str, Any]]:
+    plan = get_subscription(uid)
+    return plan, PLANS[plan]
+
+def todays_bounds_utc() -> Tuple[str, str]:
+    today = date.today().isoformat()
+    return f"{today}T00:00:00", f"{today}T23:59:59"
+
+def chat_messages_today(uid: int) -> int:
+    start, end = todays_bounds_utc()
+    conn = db()
+    cnt = conn.execute("""
+        SELECT COUNT(*) as c
+        FROM memory
+        WHERE user_id = ? AND title = 'Chat note'
+          AND created_at BETWEEN ? AND ?
+    """, (uid, start, end)).fetchone()["c"]
+    conn.close()
+    return int(cnt)
+
+def memory_count(uid: int) -> int:
+    conn = db()
+    cnt = conn.execute("SELECT COUNT(*) as c FROM memory WHERE user_id = ?", (uid,)).fetchone()["c"]
+    conn.close()
+    return int(cnt)
+
+# ============== LLM ==============
+_client = None
+_llm_ready = bool(OPENAI_API_KEY)
+if _llm_ready:
+    try:
+        from openai import OpenAI  # type: ignore
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        print("⚠ Could not init OpenAI client:", e)
+        _llm_ready = False
+
+def fetch_recent_memories(uid: int, limit: int) -> List[Dict[str, Any]]:
+    conn = db()
+    rows = conn.execute(
+        "SELECT title, content, updated_at FROM memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+        (uid, limit),
+    ).fetchall()
+    conn.close()
+    return [{"title": r["title"], "content": r["content"], "updated_at": r["updated_at"]} for r in rows]
+
+def llm_reply(uid: int, user_text: str) -> str:
+    plan, cfg = plan_cfg(uid)
+    name = (get_user(uid) or {}).get("display_name") or "friend"
+    memories = fetch_recent_memories(uid, limit=cfg["context_notes"])
+    mem_bullets = "\n".join(f"- {m['title']}: {m['content'][:180].strip()}" for m in memories) or "- (no saved notes yet)"
+
+    system = (
+        "You are Coffee Chat, a gentle, supportive companion. "
+        "Be concise, warm, and practical. If the user asks for help, suggest one small next step."
+    )
+    context = (
+        f"User goes by: {name}\nRecent notes:\n{mem_bullets}\n"
+        "Only use these notes if they help; otherwise ignore."
+    )
+
+    if not _llm_ready or _client is None:
+        return (
+            "I’m running in local/dev mode without an LLM key. "
+            "Here’s an echo while we get set up:\n\n"
+            f"“{user_text}”\n\nTip: set OPENAI_API_KEY / OPENAI_MODEL_* for real replies."
+        )
+    try:
+        resp = _client.chat.completions.create(
+            model=cfg["model"],
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "system", "content": context},
+                {"role": "user", "content": user_text},
+            ],
+            temperature=0.7,
+            max_tokens=cfg["max_tokens"],
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Sorry, I couldn’t reach the chat service ({e}). Please try again shortly."
+
+# ============== Layout ==============
+def layout(body: str, user: Optional[sqlite3.Row] = None, title: str = "Coffee Chat") -> str:
+    dark = False
+    plan_badge = ""
+    if user:
+        uid = user["id"]
+        conn = db()
+        pref = conn.execute("SELECT dark_mode FROM preferences WHERE user_id = ?", (uid,)).fetchone()
+        conn.close()
+        if pref and pref["dark_mode"]:
+            dark = True
+        plan = get_subscription(uid)
+        plan_badge = f"<span class='badge'>{PLANS[plan]['name']}</span>"
+    return f"""<!doctype html>
+<html lang="en" {'data-theme="dark"' if dark else ''}>
+<head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title}</title>
+<style>
+:root {{
+  --bg:#f6f7fb; --card:#fff; --text:#222; --muted:#666; --accent:#6f4e37; --link:#3b82f6; --border:#e5e7eb;
+}}
+[data-theme="dark"] {{
+  --bg:#0f1115; --card:#151821; --text:#eaeff7; --muted:#a5adba; --accent:#c7a17a; --link:#8ab4f8; --border:#2a2f3a;
+}}
+html,body {{ background:var(--bg); color:var(--text); margin:0; padding:0; font-family:system-ui,-apple-system,Segoe UI,Inter,Arial; }}
+.container {{ max-width:980px; margin:0 auto; padding:24px; }}
+.nav {{ display:flex; gap:14px; align-items:center; justify-content:space-between; margin-bottom:16px; }}
+.nav a {{ color:var(--link); text-decoration:none; font-weight:600; }}
+.card {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; box-shadow:0 6px 20px rgba(0,0,0,0.04); }}
+h1,h2,h3 {{ margin-top:0.2em; }}
+label {{ display:block; margin-top:12px; font-weight:600; }}
+input[type="text"],input[type="email"],input[type="password"],textarea,select {{
+  width:100%; padding:10px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text);
+}}
+button {{ margin-top:14px; padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:var(--accent); color:#fff; font-weight:700; cursor:pointer; }}
+.small {{ color:var(--muted); font-size:.9em; }}
+.hero {{ display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:center; }}
+.hero img {{ width:100%; border-radius:14px; border:1px solid var(--border); }}
+nav .right a {{ margin-left:12px; }}
+ul.clean {{ list-style:none; padding-left:0; }}
+li.item {{ padding:10px 0; border-bottom:1px dashed var(--border); }}
+a.btn-link {{ display:inline-block; margin-top:10px; text-decoration:none; color:#fff; background:var(--link); padding:8px 12px; border-radius:8px; font-weight:700; }}
+.msg {{ white-space:pre-wrap; border:1px solid var(--border); border-radius:12px; padding:12px; margin:8px 0; }}
+.msg.user {{ background:rgba(59,130,246,.08); }}
+.msg.bot  {{ background:rgba(111,78,55,.08); }}
+.badge {{ display:inline-block; margin-left:8px; padding:2px 8px; border-radius:10px; border:1px solid var(--border); font-size:12px; color:var(--muted); }}
+.grid3 {{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }}
+.pricecard .price {{ font-size:28px; font-weight:800; }}
+.notice {{ background:rgba(255,193,7,.12); border:1px solid rgba(255,193,7,.3); padding:10px; border-radius:10px; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="nav">
+    <div class="left"><a href="/">☕ Coffee Chat</a> {plan_badge}</div>
+    <div class="right">
+      {"<a href='/chat'>Chat</a> <a href='/memory'>Memory</a> <a href='/preferences'>Preferences</a> <a href='/pricing'>Pricing</a> <a href='/logout'>Log out</a>" if user else "<a href='/pricing'>Pricing</a> <a href='/signup'>Sign up</a> <a href='/login'>Log in</a>"}
+    </div>
+  </div>
+  {body}
+</div>
+</body>
+</html>"""
+
+# ============== Auth & Core Pages ==============
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    uid = current_user_id(request); user = get_user(uid) if uid else None
+    name = user["display_name"] if user and user["display_name"] else "friend"
+    body = f"""
+    <div class="card">
+      <div class="hero">
+        <div>
+          <h1>Welcome {name} 👋</h1>
+          <p class="small">A simple space to say how you feel, jot down thoughts, and keep gentle track of your days.</p>
+          {"<a class='btn-link' href='/chat'>Open Chat</a> <a class='btn-link' href='/memory'>Your Memory</a>" if user else "<a class='btn-link' href='/signup'>Create an account</a> <a class='btn-link' href='/login'>I already have an account</a>"}
+          <a class='btn-link' href='/pricing' style='background:#10b981'>See pricing</a>
+        </div>
+        <img src="/static/coffee-chat.png" alt="Coffee chat" onerror="this.style.display='none'">
+      </div>
+    </div>"""
+    return layout(body, user)
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_form(request: Request):
+    if current_user_id(request): return RedirectResponse("/", status_code=303)
+    body = """
+    <div class="card">
+      <h2>Create your account</h2>
+      <form method="post" action="/signup">
+        <label>Email</label><input type="email" name="email" required />
+        <label>Password</label><input type="password" name="password" minlength="6" required />
+        <button type="submit">Sign up</button>
+      </form>
+      <p class="small">Already registered? <a href="/login">Log in</a></p>
+    </div>"""
+    return layout(body, None)
+
+@app.post("/signup")
+def signup(request: Request, email: str = Form(...), password: str = Form(...)):
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email.strip().lower(), hash_password(password), datetime.utcnow().isoformat()),
+        )
+        uid = conn.execute("SELECT id FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()["id"]
+        conn.execute("INSERT OR IGNORE INTO preferences (user_id, timezone, dark_mode, notifications) VALUES (?, 'UTC', 0, 1)", (uid,))
+        conn.execute("INSERT OR REPLACE INTO subscriptions (user_id, plan, status, started_at) VALUES (?, 'free', 'active', ?)", (uid, datetime.utcnow().isoformat()))
+        conn.commit()
+        request.session["user_id"] = uid
+        return RedirectResponse("/name", status_code=303)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return HTMLResponse(layout("<div class='card'><h3>That email is already registered.</h3><p><a href='/login'>Log in</a> or try another email.</p></div>", None), status_code=400)
+    finally:
+        conn.close()
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(request: Request):
+    if current_user_id(request): return RedirectResponse("/", status_code=303)
+    body = """
+    <div class="card">
+      <h2>Log in</h2>
+      <form method="post" action="/login">
+        <label>Email</label><input type="email" name="email" required />
+        <label>Password</label><input type="password" name="password" required />
+        <button type="submit">Log in</button>
+      </form>
+      <p class="small">New here? <a href="/signup">Create an account</a></p>
+    </div>"""
+    return layout(body, None)
+
+@app.post("/login")
+def login(request: Request, email: str = Form(...), password: str = Form(...)):
+    conn = db()
+    user = conn.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
+    conn.close()
+    if not user or not check_password(password, user["password_hash"]):
+        return HTMLResponse(layout("<div class='card'><h3>Invalid email or password.</h3><p><a href='/login'>Try again</a></p></div>", None), status_code=401)
+    request.session["user_id"] = user["id"]
+    ensure_subscription_row(user["id"])
+    if not user["display_name"]:
+        return RedirectResponse("/name", status_code=303)
+    return RedirectResponse("/", status_code=303)
+
+@app.get("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/", status_code=303)
+
+@app.get("/name", response_class=HTMLResponse)
+def name_form(request: Request):
+    redir = require_login(request); 
+    if redir: return redir
+    uid = current_user_id(request); user = get_user(uid)
+    body = f"""
+    <div class="card">
+      <h2>Choose how I address you</h2>
+      <form method="post" action="/name">
+        <label>Display name</label>
+        <input type="text" name="display_name" value="{(user['display_name'] or '') if user else ''}" maxlength="50" />
+        <button type="submit">Save name</button>
+      </form>
+    </div>"""
+    return layout(body, user)
+
+@app.post("/name")
+def set_name(request: Request, display_name: str = Form("")):
+    redir = require_login(request); 
+    if redir: return redir
+    uid = current_user_id(request)
+    conn = db()
+    conn.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name.strip() or None, uid))
+    conn.commit(); conn.close()
+    return RedirectResponse("/", status_code=303)
+
+# ============== Pricing & Billing ==============
+@app.get("/pricing", response_class=HTMLResponse)
+def pricing(request: Request):
+    uid = current_user_id(request); user = get_user(uid) if uid else None
+    current = get_subscription(uid) if uid else "free"
+    warn = "" if env_prices_loaded() else "<div class='notice small'>Stripe price IDs not configured. Set STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO.</div>"
+    cards = []
+    for key in ["free", "plus", "pro"]:
+        p = PLANS[key]
+        features = [
+            f"{p['chat_daily']} chat messages/day",
+            f"{p['memory_limit']} memory notes",
+            ("Memory search" if p['allow_search'] else "No memory search"),
+            ("CSV export" if p['allow_export'] else "No export"),
+            ("Mood on notes" if p['allow_mood'] else "No mood field"),
+        ]
+        feat_html = "".join(f"<li>• {f}</li>" for f in features)
+        if uid:
+            if key == current:
+                cta = "<div class='small'>Current plan</div>"
+            else:
+                if key == "free":
+                    cta = "<div class='small'>You can downgrade in the Billing Portal.</div>"
+                else:
+                    cta = f"<form method='post' action='/billing/checkout'><input type='hidden' name='plan' value='{key}' /><button type='submit'>Subscribe to {p['name']}</button></form>"
+        else:
+            cta = "<a class='btn-link' href='/signup'>Create an account</a>"
+        cards.append(f"""
+        <div class="card pricecard">
+          <h3>{p['name']}</h3>
+          <div class="price">{p['price']}</div>
+          <ul class="clean">{feat_html}</ul>
+          {cta}
+        </div>""")
+    portal_btn = ""
+    if uid:
+        portal_btn = "<form method='post' action='/billing/portal'><button type='submit'>Open Billing Portal</button></form>"
+    body = f"""
+    <div class="card">
+      <h2>Choose your plan</h2>
+      <p class="small">Manage your subscription any time in the Billing Portal.</p>
+      {portal_btn}
+      {warn}
+    </div>
+    <div class="grid3">{''.join(cards)}</div>"""
+    return layout(body, user, title="Pricing — Coffee Chat")
+
+def get_or_create_stripe_customer(user: sqlite3.Row) -> str:
+    # reuse if stored
+    if user["stripe_customer_id"]:
+        return user["stripe_customer_id"]
+    if not STRIPE_SECRET_KEY:
+        raise RuntimeError("Stripe not configured")
+    # create customer
+    cust = stripe.Customer.create(email=user["email"], metadata={"app_user_id": str(user["id"])})
+    conn = db()
+    conn.execute("UPDATE users SET stripe_customer_id = ? WHERE id = ?", (cust.id, user["id"]))
+    conn.commit(); conn.close()
+    return cust.id
+
+def plan_to_price_id(plan: str) -> Optional[str]:
+    if plan == "plus":
+        return STRIPE_PRICE_PLUS
+    if plan == "pro":
+        return STRIPE_PRICE_PRO
+    return None
+
+def price_id_to_plan(price_id: str) -> Optional[str]:
+    if not PRICE_TO_PLAN:
+        if STRIPE_PRICE_PLUS: PRICE_TO_PLAN[STRIPE_PRICE_PLUS] = "plus"
+        if STRIPE_PRICE_PRO:  PRICE_TO_PLAN[STRIPE_PRICE_PRO]  = "pro"
+    return PRICE_TO_PLAN.get(price_id)
+
+@app.post("/billing/checkout")
+def billing_checkout(request: Request, plan: str = Form(...)):
+    redir = require_login(request); 
+    if redir: return redir
+    uid = current_user_id(request); user = get_user(uid)
+    if plan not in ("plus", "pro"):
+        return HTMLResponse(layout("<div class='card'><h3>Unknown plan.</h3></div>", user), status_code=400)
+    price_id = plan_to_price_id(plan)
+    if not (STRIPE_SECRET_KEY and price_id and PUBLIC_URL):
+        return HTMLResponse(layout("<div class='card'><h3>Stripe not configured. Set STRIPE_SECRET_KEY, PUBLIC_URL and STRIPE_PRICE_*.</h3></div>", user), status_code=500)
+    customer_id = get_or_create_stripe_customer(user)
+
+    session = stripe.checkout.Session.create(
+        mode="subscription",
+        payment_method_types=["card"],
+        customer=customer_id,
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{PUBLIC_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{PUBLIC_URL}/pricing",
+        metadata={"app_user_id": str(uid), "app_plan": plan},
+    )
+    return RedirectResponse(session.url, status_code=303)
+
+@app.get("/billing/success", response_class=HTMLResponse)
+def billing_success(request: Request, session_id: str = Query(None)):
+    uid = current_user_id(request); user = get_user(uid) if uid else None
+    info = "<p class='small'>If your payment succeeded, your plan will update automatically.</p>"
+    if STRIPE_SECRET_KEY and session_id:
         try:
-            r = client.chat.completions.create(model=MODEL_NAME, messages=history, temperature=0.7, stream=True)
-            parts=[]
-            for chunk in r:
-                delta = None
-                try:
-                    delta = chunk.choices[0].delta.content
-                except Exception:
-                    try: delta = chunk.choices[0].message.content
-                    except Exception: delta = None
-                if not delta: continue
-                parts.append(delta)
-                yield "data: " + delta.replace("\n","\\n") + "\n\n"
-            final = "".join(parts)
-            save_message(sid, "assistant", final)
-            yield "data: [DONE]\n\n"
+            sess = stripe.checkout.Session.retrieve(session_id, expand=["subscription", "line_items"])
+            if sess and sess.subscription:
+                info = "<p class='small'>Subscription created. It may take a few seconds to reflect here.</p>"
+        except Exception:
+            pass
+    body = f"""
+    <div class="card">
+      <h2>Thanks!</h2>
+      {info}
+      <p><a href="/pricing">Back to pricing</a></p>
+    </div>"""
+    return layout(body, user)
+
+@app.post("/billing/portal")
+def billing_portal(request: Request):
+    redir = require_login(request); 
+    if redir: return redir
+    uid = current_user_id(request); user = get_user(uid)
+    if not STRIPE_SECRET_KEY or not PUBLIC_URL:
+        return HTMLResponse(layout("<div class='card'><h3>Stripe not configured.</h3></div>", user), status_code=500)
+    customer_id = get_or_create_stripe_customer(user)
+    portal = stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=f"{PUBLIC_URL}/pricing",
+    )
+    return RedirectResponse(portal.url, status_code=303)
+
+# ============== Webhook ==============
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        # Unsafe: accept all (dev only)
+        payload = await request.body()
+        event = None
+        try:
+            event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
         except Exception as e:
-            yield "data: " + ("[Error] "+str(e)).replace("\n","\\n") + "\n\n"
-            yield "data: [DONE]\n\n"
+            return PlainTextResponse(f"Invalid payload: {e}", status_code=400)
+    else:
+        sig = request.headers.get("stripe-signature")
+        payload = await request.body()
+        try:
+            event = stripe.Webhook.construct_event(
+                payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
+            )
+        except Exception as e:
+            return PlainTextResponse(f"Webhook error: {e}", status_code=400)
 
-    resp = StreamingResponse(stream(), media_type="text/event-stream")
-    resp.set_cookie("session_id", sid, httponly=True, samesite="Lax", max_age=60*60*24*90)
-    return resp
+    # Handle
+    etype = event["type"]
+    data = event["data"]["object"]
 
-# ---------- Export ----------
-@app.get("/api/export")
-async def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
-    sid = request.cookies.get("session_id")
-    if not sid: return JSONResponse({"error": "No session"}, status_code=400)
-    msgs = get_all_messages(sid)
-    now = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
-    if fmt == "txt":
-        lines=[]
-        for role, content, ts in msgs:
-            t = datetime.datetime.utcfromtimestamp(ts).isoformat()+"Z"
-            who = "User" if role=="user" else ("Assistant" if role=="assistant" else role)
-            lines.append(f"[{t}] {who}: {content}")
-        text="\n".join(lines)+"\n"
-        return PlainTextResponse(text, headers={"Content-Disposition": f'attachment; filename="kindfriend_{now}.txt"', "Content-Type": "text/plain; charset=utf-8"})
-    # csv
-    output = io.StringIO(); w = csv.writer(output); w.writerow(["time_utc","role","content"])
-    for role, content, ts in msgs:
-        t = datetime.datetime.utcfromtimestamp(ts).isoformat()+"Z"; w.writerow([t, role, content])
-    csv_data = output.getvalue()
-    return PlainTextResponse(csv_data, headers={"Content-Disposition": f'attachment; filename="kindfriend_{now}.csv"', "Content-Type": "text/csv; charset=utf-8"})
+    # Helper: map Stripe customer -> app user
+    def find_user_by_customer(customer_id: str) -> Optional[sqlite3.Row]:
+        conn = db()
+        row = conn.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
+        conn.close()
+        return row
+
+    try:
+        if etype in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+            # On completed checkout, get subscription, map to plan, set subscription row
+            sess = data
+            customer_id = sess.get("customer")
+            sub_id = sess.get("subscription") if isinstance(sess.get("subscription"), str) else (sess.get("subscription") or {}).get("id")
+            if customer_id and sub_id:
+                # fetch subscription for price
+                subscription = stripe.Subscription.retrieve(sub_id, expand=["items.data.price"])
+                price_id = subscription["items"]["data"][0]["price"]["id"]
+                plan = price_id_to_plan(price_id) or "free"
+                user = find_user_by_customer(customer_id)
+                if user:
+                    set_plan(
+                        uid=user["id"],
+                        plan=plan,
+                        sub_id=subscription["id"],
+                        status=subscription["status"],
+                        cpe=int(subscription["current_period_end"]),
+                    )
+
+        elif etype in ("customer.subscription.created", "customer.subscription.updated"):
+            sub = data
+            customer_id = sub.get("customer")
+            price_id = None
+            try:
+                price_id = sub["items"]["data"][0]["price"]["id"]
+            except Exception:
+                pass
+            plan = price_id_to_plan(price_id) if price_id else None
+            user = find_user_by_customer(customer_id) if customer_id else None
+            if user:
+                set_plan(
+                    uid=user["id"],
+                    plan=(plan or "free") if sub["status"] in ("active", "trialing", "past_due") else "free",
+                    sub_id=sub["id"],
+                    status=sub["status"],
+                    cpe=int(sub["current_period_end"]) if sub.get("current_period_end") else None,
+                )
+
+        elif etype in ("customer.subscription.deleted", "customer.subscription.cancelled"):
+            sub = data
+            customer_id = sub.get("customer")
+            user = find_user_by_customer(customer_id) if customer_id else None
+            if user:
+                # revert to free on cancel
+                set_plan(uid=user["id"], plan="free", sub_id=None, status="canceled", cpe=None)
+
+    except Exception as e:
+        # Log error but return 200 so Stripe retries only if genuine failure
+        print("Webhook handling error:", e)
+
+    return JSONResponse({"received": True})
+
+# ============== Memory & Chat with limits ==============
+@app.get("/memory", response_class=HTMLResponse)
+def memory_list(request: Request, q: Optional[str] = Query(None)):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); ensure_subscription_row(uid)
+    plan, cfg = plan_cfg(uid); user = get_user(uid)
+
+    conn = db()
+    if q:
+        if not cfg["allow_search"]:
+            conn.close()
+            return HTMLResponse(layout("<div class='card'><h3>Search is available on Plus & Pro.</h3><p><a href='/pricing'>Upgrade</a></p></div>", user), status_code=403)
+        like = f"%{q.strip()}%"
+        rows = conn.execute(
+            "SELECT id, title, created_at, updated_at, mood FROM memory WHERE user_id = ? AND (title LIKE ? OR content LIKE ?) ORDER BY updated_at DESC",
+            (uid, like, like),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, title, created_at, updated_at, mood FROM memory WHERE user_id = ? ORDER BY updated_at DESC",
+            (uid,),
+        ).fetchall()
+    conn.close()
+
+    items = "".join(
+        f"<li class='item'><a href='/memory/{r['id']}'>{r['title']}</a> "
+        f"<span class='small'> — updated {r['updated_at']}{(' • mood: ' + r['mood']) if r['mood'] else ''}</span></li>"
+        for r in rows
+    ) or "<p class='small'>No entries yet.</p>"
+
+    searchbar = ""
+    exportbtn = ""
+    if cfg["allow_search"]:
+        val = q or ""
+        searchbar = f"""
+        <form method="get" action="/memory">
+          <input type="text" name="q" value="{val}" placeholder="Search your notes..." />
+          <button type="submit">Search</button>
+        </form>"""
+    if cfg["allow_export"]:
+        exportbtn = "<a class='btn-link' href='/memory/export'>Export CSV</a>"
+
+    usage = f"<p class='small'>Notes: {memory_count(uid)}/{cfg['memory_limit']}</p>"
+
+    body = f"""
+    <div class="card">
+      <h2>Your Memory</h2>
+      <p class="small">Write short notes, thoughts, or anything you want to remember.</p>
+      <a class='btn-link' href='/memory/new'>New entry</a>
+      {exportbtn}
+      {usage}
+      {searchbar}
+      <ul class="clean">{items}</ul>
+    </div>"""
+    return layout(body, user)
+
+@app.get("/memory/export")
+def memory_export(request: Request):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
+    if not cfg["allow_export"]:
+        return HTMLResponse(layout("<div class='card'><h3>Export is available on Plus & Pro.</h3><p><a href='/pricing'>Upgrade</a></p></div>", get_user(uid)), status_code=403)
+
+    conn = db()
+    rows = conn.execute("SELECT id, title, content, mood, created_at, updated_at FROM memory WHERE user_id = ? ORDER BY created_at ASC", (uid,)).fetchall()
+    conn.close()
+
+    buf = io.StringIO(); writer = csv.writer(buf)
+    writer.writerow(["id", "title", "content", "mood", "created_at", "updated_at"])
+    for r in rows:
+        writer.writerow([r["id"], r["title"], r["content"], r["mood"] or "", r["created_at"], r["updated_at"]])
+    data = buf.getvalue().encode("utf-8-sig")
+    headers = {"Content-Disposition": "attachment; filename=coffee_chat_export.csv"}
+    return Response(content=data, media_type="text/csv; charset=utf-8", headers=headers)
+
+@app.get("/memory/new", response_class=HTMLResponse)
+def memory_new_form(request: Request):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); user = get_user(uid)
+    plan, cfg = plan_cfg(uid)
+    if memory_count(uid) >= cfg["memory_limit"]:
+        return HTMLResponse(layout("<div class='card'><h3>You've reached your note limit.</h3><p><a href='/pricing'>Upgrade</a> to add more.</p></div>", user), status_code=403)
+    mood_field = ""
+    if cfg["allow_mood"]:
+        mood_field = """
+        <label>Mood (optional)</label>
+        <select name="mood">
+          <option value="">--</option>
+          <option value="😊">😊 Positive</option>
+          <option value="😐">😐 Neutral</option>
+          <option value="😟">😟 Low</option>
+        </select>"""
+    body = f"""
+    <div class="card">
+      <h2>New memory</h2>
+      <form method="post" action="/memory/new">
+        <label>Title</label><input type="text" name="title" required maxlength="120" />
+        <label>Content</label><textarea name="content" rows="8" required></textarea>
+        {mood_field}
+        <button type="submit">Save</button>
+      </form>
+    </div>"""
+    return layout(body, user)
+
+@app.post("/memory/new")
+def memory_create(request: Request, title: str = Form(...), content: str = Form(...), mood: str = Form("")):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
+    if memory_count(uid) >= cfg["memory_limit"]:
+        return HTMLResponse(layout("<div class='card'><h3>Note limit reached. Upgrade to add more.</h3><p><a href='/pricing'>Pricing</a></p></div>", get_user(uid)), status_code=403)
+    now = datetime.utcnow().isoformat()
+    conn = db()
+    conn.execute(
+        "INSERT INTO memory (user_id, title, content, mood, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (uid, title.strip(), content.strip(), (mood or None), now, now),
+    )
+    conn.commit()
+    new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    conn.close()
+    return RedirectResponse(f"/memory/{new_id}", status_code=303)
+
+@app.get("/memory/{mid}", response_class=HTMLResponse)
+def memory_detail(request: Request, mid: int):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
+    user = get_user(uid)
+    conn = db()
+    row = conn.execute("SELECT * FROM memory WHERE id = ? AND user_id = ?", (mid, uid)).fetchone()
+    conn.close()
+    if not row:
+        return HTMLResponse(layout("<div class='card'><h3>Not found.</h3></div>", user), status_code=404)
+    mood_field = ""
+    if cfg["allow_mood"]:
+        mv = row["mood"] or ""
+        mood_field = f"""
+        <label>Mood (optional)</label>
+        <select name="mood">
+          <option value="" {'selected' if mv == '' else ''}>--</option>
+          <option value="😊" {'selected' if mv == '😊' else ''}>😊 Positive</option>
+          <option value="😐" {'selected' if mv == '😐' else ''}>😐 Neutral</option>
+          <option value="😟" {'selected' if mv == '😟' else ''}>😟 Low</option>
+        </select>"""
+    body = f"""
+    <div class="card">
+      <h2>Edit memory</h2>
+      <form method="post" action="/memory/{row['id']}">
+        <label>Title</label><input type="text" name="title" value="{row['title']}" required maxlength="120" />
+        <label>Content</label><textarea name="content" rows="10" required>{row['content']}</textarea>
+        {mood_field}
+        <button type="submit" name="action" value="save">Save changes</button>
+        <button type="submit" name="action" value="delete" style="background:#b91c1c">Delete</button>
+      </form>
+      <p class="small">Created {row['created_at']} • Updated {row['updated_at']}{(' • mood: ' + (row['mood'] or '')) if row['mood'] else ''}</p>
+    </div>"""
+    return layout(body, user)
+
+@app.post("/memory/{mid}")
+def memory_update(request: Request, mid: int, action: str = Form(...), title: str = Form(""), content: str = Form(""), mood: str = Form("")):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
+    conn = db()
+    if action == "delete":
+        conn.execute("DELETE FROM memory WHERE id = ? AND user_id = ?", (mid, uid))
+        conn.commit(); conn.close()
+        return RedirectResponse("/memory", status_code=303)
+    now = datetime.utcnow().isoformat()
+    if cfg["allow_mood"]:
+        conn.execute("UPDATE memory SET title=?, content=?, mood=?, updated_at=? WHERE id=? AND user_id=?", (title.strip(), content.strip(), (mood or None), now, mid, uid))
+    else:
+        conn.execute("UPDATE memory SET title=?, content=?, updated_at=? WHERE id=? AND user_id=?", (title.strip(), content.strip(), now, mid, uid))
+    conn.commit(); conn.close()
+    return RedirectResponse(f"/memory/{mid}", status_code=303)
+
+# ============== Chat UI (limits per plan) ==============
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page(request: Request):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); ensure_subscription_row(uid)
+    user = get_user(uid); plan, cfg = plan_cfg(uid)
+    used = chat_messages_today(uid); remaining = max(cfg["chat_daily"] - used, 0)
+    hint = "" if _llm_ready else "<p class='small'>LLM is in local/dev mode. Set <code>OPENAI_API_KEY</code>.</p>"
+    cap_notice = f"<div class='notice small'>Daily messages: {used}/{cfg['chat_daily']}. Remaining: {remaining}.</div>"
+    disabled = "disabled" if remaining <= 0 else ""
+    reached = "<p class='small'>You’ve hit today’s chat limit. It resets at midnight. <a href='/pricing'>Upgrade</a> for more.</p>" if remaining <= 0 else ""
+    body = f"""
+    <div class="card">
+      <h2>Coffee Chat</h2>
+      {cap_notice}{hint}
+      <form method="post" action="/chat">
+        <label>Your message</label>
+        <textarea name="message" rows="5" placeholder="What's on your mind?" required {disabled}></textarea>
+        <button type="submit" {disabled}>Send</button>
+      </form>
+      {reached}
+    </div>"""
+    return layout(body, user)
+
+@app.post("/chat", response_class=HTMLResponse)
+def chat_post(request: Request, message: str = Form(...)):
+    redir = require_login(request)
+    if redir: return redir
+    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
+    used = chat_messages_today(uid)
+    if used >= cfg["chat_daily"]:
+        return HTMLResponse(layout("<div class='card'><h3>Daily chat limit reached.</h3><p><a href='/pricing'>Upgrade</a> for more.</p></div>", get_user(uid)), status_code=403)
+    now = datetime.utcnow().isoformat()
+    conn = db()
+    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Chat note', ?, ?, ?)", (uid, message.strip(), now, now))
+    conn.commit(); conn.close()
+    reply = llm_reply(uid, message)
+    conn = db()
+    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Assistant reply', ?, ?, ?)", (uid, reply, now, datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
+    user = get_user(uid)
+    used_after = chat_messages_today(uid); remaining = max(cfg["chat_daily"] - used_after, 0)
+    cap_notice = f"<div class='notice small'>Daily messages: {used_after}/{cfg['chat_daily']}. Remaining: {remaining}.</div>"
+    body = f"""
+    <div class="card">
+      <h2>Coffee Chat</h2>
+      {cap_notice}
+      <div class="msg user"><strong>You:</strong><br>{message}</div>
+      <div class="msg bot"><strong>Assistant:</strong><br>{reply}</div>
+      <form method="post" action="/chat" style="margin-top:16px">
+        <label>Say more</label>
+        <textarea name="message" rows="4" placeholder="Add a follow-up…" required></textarea>
+        <button type="submit">Send</button>
+      </form>
+      <p class="small">This exchange was saved to your <a href="/memory">Memory</a>.</p>
+    </div>"""
+    return layout(body, user)
+
+# JSON chat API if you build a front-end later
+@app.post("/api/chat")
+def api_chat(request: Request, payload: Dict[str, Any] = None):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error": "not_authenticated"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    used = chat_messages_today(uid)
+    if used >= cfg["chat_daily"]:
+        return JSONResponse({"error": "limit_reached"}, status_code=403)
+    data = payload or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return JSONResponse({"error": "message_required"}, status_code=400)
+    now = datetime.utcnow().isoformat()
+    conn = db()
+    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Chat note', ?, ?, ?)", (uid, message, now, now))
+    conn.commit(); conn.close()
+    reply = llm_reply(uid, message)
+    conn = db()
+    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Assistant reply', ?, ?, ?)", (uid, reply, now, datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
+    return {"reply": reply, "saved": True}
+
+# ============== Health ==============
+@app.get("/health")
+def health():
+    try:
+        conn = db(); conn.execute("SELECT 1"); conn.close()
+        return {"ok": True, "llm_ready": _llm_ready, "stripe": bool(STRIPE_SECRET_KEY)}
+    except Exception as e:
+        return PlainTextResponse(str(e), status_code=500)
