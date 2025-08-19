@@ -381,16 +381,39 @@ LANDING_HTML = r"""<!doctype html><html lang="en"><head>
 <title>Kind Coach — Person-Centred Coaching</title>
 <link rel="icon" href="/static/favicon.ico">
 <style>
-body{margin:0;font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#f4fdf6;color:#111b21;text-align:center}
-header{background:#25d366;color:#fff;padding:2rem 1rem}
-header h1{margin:0;font-size:2.1rem}
-.hero img{max-width:820px;width:92%;height:auto;margin:2rem auto;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
-.btn{background:#25d366;border:none;color:#fff;padding:1rem 1.4rem;border-radius:999px;cursor:pointer;font-weight:700}
-.btn.alt{background:#fff;color:#073;border:1px solid #d1d7db}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:1100px;margin:1rem auto 2rem;padding:0 16px}
-.card{background:#fff;border:1px solid #d1d7db;border-radius:16px;padding:16px;box-shadow:0 6px 20px rgba(0,0,0,.06)}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
-.small{color:#54656f}
+:root{
+  --bg:#0f1221; --bg2:#0c1020; --card:#121632; --mut:#8ea1b3; --txt:#ecf3ff;
+  --brand:#6ef3a5; --brand-2:#30d695; --chip:#202645; --stroke:#2a2f52; --shadow:0 12px 40px rgba(0,0,0,.35)
+}
+*{box-sizing:border-box} html,body{height:100%}
+body{
+  margin:0; background:radial-gradient(1200px 900px at 10% -20%, #1b2147 10%, transparent 60%),
+             radial-gradient(900px 800px at 110% 0%, #20305d 10%, transparent 55%),
+             linear-gradient(180deg, var(--bg), var(--bg2));
+  color:var(--txt); font:15px/1.55 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;
+}
+header{
+  background:linear-gradient(135deg, rgba(110,243,165,.18), rgba(48,214,149,.08));
+  border-bottom:1px solid var(--stroke);
+  padding:48px 18px; text-align:center; position:sticky; top:0; backdrop-filter:saturate(150%) blur(4px)
+}
+header h1{margin:0 0 4px 0; font-size:2.25rem; letter-spacing:.2px}
+header p{margin:0; color:var(--mut)}
+.hero{display:grid; place-items:center}
+.hero img{max-width:980px; width:min(92vw,980px); height:auto; margin:26px auto; border-radius:20px; box-shadow:var(--shadow); border:1px solid var(--stroke)}
+.btn{
+  background:linear-gradient(180deg, var(--brand), var(--brand-2)); color:#041d14; border:none;
+  padding:12px 18px; border-radius:12px; cursor:pointer; font-weight:800; letter-spacing:.2px; box-shadow:0 8px 30px rgba(48,214,149,.25)
+}
+.btn.alt{
+  background:transparent; color:var(--txt); border:1px solid var(--stroke);
+}
+.grid{display:grid; grid-template-columns:repeat(3,1fr); gap:18px; max-width:1120px; margin:0 auto 28px; padding:0 18px}
+.card{
+  background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));
+  border:1px solid var(--stroke); border-radius:16px; padding:18px; box-shadow:var(--shadow)
+}
+@media (max-width:900px){ .grid{grid-template-columns:1fr} header h1{font-size:1.8rem} }
 </style></head><body>
 <header><h1>Kind Coach</h1><p>Friendly AI coaching with a person-centred touch</p></header>
 <div class="hero"><img src="/static/coffee_chat.jpg" alt="Coaching conversation"></div>
@@ -411,48 +434,83 @@ header h1{margin:0;font-size:2.1rem}
 APP_HTML = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Kind Coach</title><link rel="icon" href="/static/favicon.ico">
+# [449–490] REPLACE the entire <style>...</style> in APP_HTML with:
 <style>
-:root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--chatbg:#e7f0ea;--me:#d9fdd3;--bot:#ffffff;--br:#d1d7db;--panel:#ffffff;--shadow:0 6px 24px rgba(0,0,0,.12)}
-*{box-sizing:border-box} html,body{height:100%;margin:0}
-body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg)}
-.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,var(--gd),var(--g));color:#fff;box-shadow:var(--shadow)}
-.logo{width:36px;height:36px;border-radius:10px;background:var(--acc);display:grid;place-items:center;color:#073;font-weight:800}
-.brand{font-weight:800}.grow{flex:1 1 auto}
-.chip{font-size:12px;color:#eafff0;background:rgba(255,255,255,.15);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.25)}
-.tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
-.tb-btn.primary{background:#fff;color:#073}
-.app{display:grid;grid-template-columns:340px 1fr;height:100svh;overflow:hidden}
-@media(max-width:1000px){.app{grid-template-columns:1fr}.sidebar{display:none}}
-.sidebar{display:flex;flex-direction:column;height:calc(100svh - 60px);border-right:1px solid var(--br);background:var(--panel)}
-.side-head{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--br)}
+:root{
+  --bg:#0f1221; --panel:#121632; --panel-2:#0f1431; --stroke:#2a2f52; --txt:#eaf2ff; --mut:#8ea1b3;
+  --brand:#6ef3a5; --brand-2:#30d695; --chip:#1c2246; --me:#0e2d1f; --bot:#141a3a; --bubble:#1b2147;
+  --shadow:0 10px 40px rgba(0,0,0,.35)
+}
+*{box-sizing:border-box} html,body{height:100%}
+body{margin:0; background:radial-gradient(1200px 900px at 10% -20%, #1b2147 10%, transparent 60%),
+                      radial-gradient(900px 800px at 110% 0%, #20305d 10%, transparent 55%),
+                      linear-gradient(180deg, var(--bg), #0c1020); color:var(--txt); font:15px/1.55 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+.topbar{
+  height:64px; display:flex; align-items:center; gap:12px; padding:0 16px;
+  background:linear-gradient(135deg, rgba(110,243,165,.12), rgba(48,214,149,.06));
+  border-bottom:1px solid var(--stroke); color:var(--txt); box-shadow:var(--shadow); position:sticky; top:0; z-index:20; backdrop-filter:saturate(140%) blur(6px)
+}
+.logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(180deg,var(--brand),var(--brand-2));display:grid;place-items:center;color:#041d14;font-weight:900}
+.brand{font-weight:900; letter-spacing:.3px}
+.grow{flex:1}
+.chip{font-size:12px;color:#cfe6ff;background:var(--chip);padding:6px 10px;border-radius:999px;border:1px solid var(--stroke)}
+.tb-btn{background:transparent;color:var(--txt);border:1px solid var(--stroke);padding:8px 12px;border-radius:12px;cursor:pointer}
+.tb-btn.primary{background:linear-gradient(180deg,var(--brand),var(--brand-2)); color:#042216; border:none; font-weight:800}
+.app{display:grid;grid-template-columns:320px 1fr;height:calc(100svh - 64px);overflow:hidden}
+@media (max-width:1000px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+
+.sidebar{
+  display:flex;flex-direction:column;height:100%;border-right:1px solid var(--stroke);
+  background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00))
+}
+.side-head{display:flex;gap:8px;align-items:center;padding:14px;border-bottom:1px solid var(--stroke)}
 .side-actions{display:flex;gap:8px;padding:12px;flex-wrap:wrap}
-.list{overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:8px}
-.item{padding:10px 12px;background:#fff;border:1px solid var(--br);border-radius:12px;cursor:pointer}
-.item.active{outline:2px solid var(--acc)}
-.main{display:flex;flex-direction:column;height:calc(100svh - 60px);background:var(--chatbg);position:relative}
-.chatbar{display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--br);background:var(--panel);padding:10px 12px;flex-wrap:wrap}
-.chat{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 16px;display:grid;gap:8px}
-.row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:end}
+.list{overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px}
+.item{
+  padding:10px 12px;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));
+  border:1px solid var(--stroke);border-radius:12px;cursor:pointer;transition:transform .08s ease, border-color .12s ease
+}
+.item:hover{transform:translateY(-1px); border-color:#354070}
+.item.active{outline:2px solid var(--brand)}
+
+.main{display:flex;flex-direction:column;height:100%;position:relative;background:radial-gradient(1200px 900px at 20% -20%, #171e43 5%, transparent 60%)}
+.chatbar{
+  display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--stroke);
+  background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));padding:12px 14px;flex-wrap:wrap
+}
+.chat{
+  flex:1; min-height:0; overflow:auto; padding:22px 18px; display:grid; gap:10px;
+  background:linear-gradient(180deg, rgba(255,255,255,.00), rgba(255,255,255,.02));
+}
+.row{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:end}
 .row.user{grid-template-columns:1fr auto}.row.user .avatar{display:none}
-.avatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--g);font-weight:800}
-.bubble{max-width:70ch;padding:10px 12px;border-radius:16px;color:var(--txt);white-space:pre-wrap;word-wrap:anywhere;box-shadow:0 1px 0 rgba(0,0,0,.08);border:1px solid var(--br)}
-.row.user .bubble{background:var(--me)} .row.bot .bubble{background:var(--bot)}
+.avatar{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;color:#042216;background:linear-gradient(180deg,var(--brand),var(--brand-2));font-weight:900}
+.bubble{
+  max-width:72ch;padding:12px 14px;border-radius:14px;color:var(--txt);white-space:pre-wrap;word-wrap:anywhere;
+  background:var(--bubble); border:1px solid var(--stroke); box-shadow:var(--shadow)
+}
+.row.user .bubble{background:linear-gradient(180deg, #102a1d, #0d2018); border-color:#1e4b36}
 .meta{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:11px;margin-top:4px}
-.composer{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px;border-top:1px solid var(--br);background:var(--panel)}
-.input{padding:12px 14px;border-radius:999px;border:1px solid var(--br);background:#fff;color:var(--txt)}
-.send{background:var(--g);color:#fff;border:none;padding:10px 16px;border-radius:999px;cursor:pointer}
-.badge{background:#fff;color:#073;border:1px solid #d1d7db;border-radius:999px;padding:4px 10px;font-size:12px}
-.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40}
+.composer{display:grid;grid-template-columns:1fr auto;gap:10px;padding:12px;border-top:1px solid var(--stroke);background:linear-gradient(180deg,rgba(255,255,255,.00),rgba(255,255,255,.02))}
+.input{padding:12px 14px;border-radius:12px;border:1px solid var(--stroke);background:#0d1233;color:var(--txt)}
+.send{background:linear-gradient(180deg,var(--brand),var(--brand-2));color:#042216;border:none;padding:10px 16px;border-radius:12px;cursor:pointer;font-weight:800}
+
+.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(3,6,20,.55);backdrop-filter:blur(4px);z-index:40}
 .modal{display:none;position:fixed;inset:0;z-index:50;place-items:center}
 .modal.on,.modal-backdrop.on{display:grid}
-.modal-card{width:min(560px,94vw);background:#fff;color:var(--txt);border:1px solid var(--br);border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:16px}
+.modal-card{
+  width:min(640px,94vw);background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));
+  color:var(--txt);border:1px solid var(--stroke);border-radius:18px;box-shadow:var(--shadow);padding:18px
+}
 .modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.modal-title{font-weight:800;font-size:16px}
-.xbtn{border:1px solid var(--br);background:#fff;color:var(--txt);border-radius:10px;padding:6px 10px;cursor:pointer}
+.modal-title{font-weight:900;font-size:16px}
+.xbtn{border:1px solid var(--stroke);background:transparent;color:var(--txt);border-radius:10px;padding:6px 10px;cursor:pointer}
 .form-row{display:grid;gap:6px;margin:10px 0}
-.form-row input{padding:10px 12px;border-radius:12px;border:1px solid var(--br);background:#fff;color:var(--txt)}
+.form-row input{padding:10px 12px;border-radius:12px;border:1px solid var(--stroke);background:#0d1233;color:var(--txt)}
 .form-actions{display:flex;gap:8px;justify-content:flex-end}
-</style></head><body>
+.badge{background:var(--chip);color:#cfe6ff;border:1px solid var(--stroke);border-radius:999px;padding:4px 10px;font-size:12px}
+</style>
+</head><body>
   <div class="topbar">
     <div class="logo">KC</div>
     <div class="brand">Kind Coach</div>
@@ -596,20 +654,33 @@ document.addEventListener('DOMContentLoaded', async ()=>{ await refreshMe(); awa
 PRICING_TOP = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Pricing — Kind Coach</title><link rel="icon" href="/static/favicon.ico">
+# [759–772] REPLACE the entire <style>...</style> in PRICING_TOP with:
 <style>
-body{margin:0;background:#f0f2f5;color:#111b21;font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
-.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,#075E54,#128C7E);color:#fff;box-shadow:0 6px 24px rgba(0,0,0,.12)}
-.logo{width:36px;height:36px;border-radius:10px;background:#25D366;display:grid;place-items:center;color:#073;font-weight:800}
-.brand{font-weight:800}.grow{flex:1 1 auto}
-.tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
-.wrap{max-width:1100px;margin:20px auto;padding:0 16px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+:root{
+  --bg:#0f1221; --txt:#eaf2ff; --mut:#8ea1b3; --stroke:#2a2f52; --card:#121632; --brand:#6ef3a5; --brand-2:#30d695; --chip:#1c2246; --shadow:0 10px 40px rgba(0,0,0,.35)
+}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,var(--bg),#0c1020);color:var(--txt);font:15px/1.55 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+.topbar{
+  height:64px;display:flex;align-items:center;gap:12px;padding:0 16px;
+  background:linear-gradient(135deg, rgba(110,243,165,.12), rgba(48,214,149,.06));color:var(--txt);
+  border-bottom:1px solid var(--stroke);box-shadow:var(--shadow)
+}
+.logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(180deg,var(--brand),var(--brand-2));display:grid;place-items:center;color:#042216;font-weight:900}
+.brand{font-weight:900}.grow{flex:1}
+.tb-btn{background:transparent;color:var(--txt);border:1px solid var(--stroke);padding:8px 12px;border-radius:12px;cursor:pointer}
+.wrap{max-width:1120px;margin:22px auto;padding:0 16px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
 @media(max-width:900px){.grid{grid-template-columns:1fr}}
-.card{background:#fff;border:1px solid #d1d7db;border-radius:16px;padding:16px;box-shadow:0 6px 24px rgba(0,0,0,.06)}
-.notice{background:#fff3cd;border:1px solid #ffe69c;border-radius:12px;padding:12px;margin:10px 0;color:#664d03}
-.small{color:#54656f;font-size:13px}
-.price{font-size:24px;font-weight:800;margin-bottom:8px}
-</style></head><body>
+.card{
+  background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.00));
+  border:1px solid var(--stroke);border-radius:16px;padding:18px;box-shadow:var(--shadow)
+}
+.notice{background:rgba(255,214,102,.08);border:1px solid #ffe69c;border-radius:12px;padding:12px;margin:10px 0;color:#f8d37a}
+.small{color:var(--mut);font-size:13px}
+.price{font-size:24px;font-weight:900;margin-bottom:8px}
+</style>
+</head><body>
 <div class="topbar"><div class="logo">KC</div><div class="brand">Kind Coach · Pricing</div><div class="grow"></div>
 <button onclick="location.href='/'" class="tb-btn">Home</button>
 <button onclick="location.href='/app'" class="tb-btn">Open App</button></div>
