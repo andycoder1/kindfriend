@@ -950,28 +950,36 @@ def api_coaching_daily():
 @app.post("/api/coaching/start")
 async def api_coaching_start(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     plan, cfg = plan_cfg(uid)
     used = coaching_sessions_today(uid)
     if used >= cfg["coach_daily"]:
-        return JSONResponse({"error":"Coaching session limit reached for today. Upgrade for more."}, status_code=403)
+        return JSONResponse(
+            {"error": "Coaching session limit reached for today. Upgrade for more."},
+            status_code=403,
+        )
+
     d = await request.json()
     topic = (d.get("topic") or "").strip()
-    if not topic: return JSONResponse({"error":"Topic required"}, status_code=400)
-messages = [
+    if not topic:
+        return JSONResponse({"error": "Topic required"}, status_code=400)
+
+    messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": COACHING_STYLE},
         {"role": "system", "content": current_time_note()},
         {"role": "user", "content": f"My coaching topic today: {topic}"},
-        {"role": "assistant", "content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences."},
+        {
+            "role": "assistant",
+            "content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences.",
+        },
     ]
 
     try:
         resp = _client.chat.completions.create(
-            model=cfg["model"],
-            messages=messages,
-            temperature=0.7,
-            max_tokens=200,
+            model=cfg["model"], messages=messages, temperature=0.7, max_tokens=200
         )
         opening = (resp.choices[0].message.content or "").strip()
     except Exception as e:
@@ -1041,63 +1049,85 @@ def api_limits(request: Request):
 def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
     uid = current_user_id(request)
     if not uid:
-        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     plan, cfg = plan_cfg(uid)
     if fmt == "csv" and not cfg["allow_export_csv"]:
-        return JSONResponse({"error":"CSV export is available on Plus & Pro."}, status_code=403)
+        return JSONResponse(
+            {"error": "CSV export is available on Plus & Pro."}, status_code=403
+        )
+
     sid = request.session.get("active_session")
     if not sid:
-        return JSONResponse({"error":"No session"}, status_code=400)
+        return JSONResponse({"error": "No session"}, status_code=400)
+
     conn = db()
     rows = conn.execute(
-        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)
+        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC",
+        (sid,),
     ).fetchall()
     conn.close()
+
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
+
     if fmt == "txt":
         lines = []
         for r in rows:
-            t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
-            who = "User" if r["role"]=="user" else ("Assistant" if r["role"]=="assistant" else r["role"])
+            t = datetime.utcfromtimestamp(r["ts"]).isoformat() + "Z"
+            who = "User" if r["role"] == "user" else (
+                "Assistant" if r["role"] == "assistant" else r["role"]
+            )
             lines.append(f"[{t}] {who}: {r['content']}")
         return PlainTextResponse(
-            "\n".join(lines)+"\n",
-            headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.txt"'}
+            "\n".join(lines) + "\n",
+            headers={
+                "Content-Disposition": f'attachment; filename="kindcoach_{now}.txt"'
+            },
         )
+
     # CSV
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["time_utc","role","content"])
+    w.writerow(["time_utc", "role", "content"])
     for r in rows:
-        t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
+        t = datetime.utcfromtimestamp(r["ts"]).isoformat() + "Z"
         w.writerow([t, r["role"], r["content"]])
+
     return PlainTextResponse(
         out.getvalue(),
         headers={
             "Content-Disposition": f'attachment; filename="kindcoach_{now}.csv"',
-            "Content-Type": "text/csv; charset=utf-8"
-        }
+            "Content-Type": "text/csv; charset=utf-8",
+        },
     )
 
 @app.get("/api/chat/export")
-def api_chat_export_json(request: Request):
-    """JSON export (used by the .json button)."""
+def export_chat_json(request: Request):
     uid = current_user_id(request)
     if not uid:
-        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     sid = request.session.get("active_session")
     if not sid:
-        return JSONResponse({"error":"No session"}, status_code=400)
+        return JSONResponse({"error": "No session"}, status_code=400)
+
     conn = db()
     rows = conn.execute(
-        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)
+        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC",
+        (sid,),
     ).fetchall()
     conn.close()
-    payload = [
-        {"time_utc": datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z", "role": r["role"], "content": r["content"]}
+
+    items = [
+        {
+            "time_utc": datetime.utcfromtimestamp(r["ts"]).isoformat() + "Z",
+            "role": r["role"],
+            "content": r["content"],
+        }
         for r in rows
     ]
-    return JSONResponse({"session_id": sid, "messages": payload})
+    return JSONResponse({"session_id": sid, "messages": items})
+
 
 # ---------- Pricing page ----------
 @app.get("/pricing", response_class=HTMLResponse)
