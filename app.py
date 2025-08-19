@@ -1,24 +1,152 @@
-# app.py
+# app.py (Chunk 1 of 5)
 import os
-import io
-import csv
-import json
-import stripe
 import sqlite3
-from datetime import datetime, date
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime
+from typing import Optional
 
-from fastapi import FastAPI, Request, Form, Query, Header
-from fastapi.responses import (
-    HTMLResponse, RedirectResponse, PlainTextResponse,
-    JSONResponse, Response
-)
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-# ============== Config & Clients ==============
-APP_NAME = "Coffee Chat — A Simple Companion App"
+# ---------- Password hashing ----------
+try:
+    import bcrypt
+
+    def hash_password(p: str) -> str:
+        return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+
+    def check_password(p: str, h: str) -> bool:
+        return bcrypt.checkpw(p.encode(), h.encode())
+except Exception:
+    import hashlib
+
+    def hash_password(p: str) -> str:
+        return hashlib.sha256(p.encode()).hexdigest()
+
+    def check_password(p: str, h: str) -> bool:
+        return hashlib.sha256(p.encode()).hexdigest() == h
+
+
+# ---------- App setup ----------
+app = FastAPI(title="Personal Coach App")
+
+SECRET_KEY = os.getenv("APP_SECRET_KEY", "dev-secret")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+if not os.path.exists("static"):
+    os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+DB_PATH = os.getenv("APP_DB_PATH", "app.db")
+
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+001 def init_db():
+002     conn = db()
+003     cur = conn.cursor()
+004 
+005     # users
+006     cur.execute("""
+007         CREATE TABLE IF NOT EXISTS users (
+008             id INTEGER PRIMARY KEY AUTOINCREMENT,
+009             email TEXT UNIQUE NOT NULL,
+010             password_hash TEXT NOT NULL,
+011             display_name TEXT,
+012             tier TEXT DEFAULT 'free',
+013             created_at TEXT NOT NULL,
+014             stripe_customer_id TEXT
+015         )
+016     """)
+017 
+018     # preferences
+019     cur.execute("""
+020         CREATE TABLE IF NOT EXISTS preferences (
+021             user_id INTEGER PRIMARY KEY,
+022             timezone TEXT DEFAULT 'UTC',
+023             dark_mode INTEGER DEFAULT 0,
+024             notifications INTEGER DEFAULT 1,
+025             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+026         )
+027     """)
+028 
+029     # user memories (for coaching/journaling)
+030     cur.execute("""
+031         CREATE TABLE IF NOT EXISTS user_memories (
+032             id TEXT PRIMARY KEY,
+033             user_id INTEGER NOT NULL,
+034             note TEXT NOT NULL,
+035             created_at TEXT NOT NULL,
+036             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+037         )
+038     """)
+039 
+040     # chat sessions
+041     cur.execute("""
+042         CREATE TABLE IF NOT EXISTS sessions (
+043             id TEXT PRIMARY KEY,
+044             user_id INTEGER NOT NULL,
+045             title TEXT,
+046             created_at REAL NOT NULL,
+047             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+048         )
+049     """)
+050 
+051     # chat messages
+052     cur.execute("""
+053         CREATE TABLE IF NOT EXISTS messages (
+054             session_id TEXT NOT NULL,
+055             role TEXT NOT NULL,     -- 'user' | 'assistant'
+056             content TEXT NOT NULL,
+057             ts REAL NOT NULL,
+058             FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+059         )
+060     """)
+061 
+062     # coaching sessions
+063     cur.execute("""
+064         CREATE TABLE IF NOT EXISTS coaching (
+065             id INTEGER PRIMARY KEY AUTOINCREMENT,
+066             user_id INTEGER NOT NULL,
+067             topic TEXT NOT NULL,
+068             reflections TEXT NOT NULL,
+069             created_at TEXT NOT NULL,
+070             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+071         )
+072     """)
+073 
+074     # optional indices for performance
+075     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+076     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts)")
+077     cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id)")
+078 
+079     conn.commit()
+080     conn.close()
+
+
+init_db()
+# app.py (Chunk 2 of 5) — Config, Plans, OpenAI/Stripe, helpers
+import sys, io, csv, json, time, uuid
+from typing import Dict, Any, Tuple, List
+from zoneinfo import ZoneInfo
+from fastapi import Query, Path
+from fastapi.responses import JSONResponse
+
+# ===== Environment =====
+APP_NAME = "Kind Coach"
+APP_TZ = os.getenv("APP_TZ", "Europe/London")
 
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -27,173 +155,135 @@ OPENAI_MODEL_PLUS = os.getenv("OPENAI_MODEL_PLUS", "gpt-4o-mini")
 OPENAI_MODEL_PRO  = os.getenv("OPENAI_MODEL_PRO",  "gpt-4o")
 
 # Stripe
+PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
 STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET")
-STRIPE_PRICE_PLUS      = os.getenv("STRIPE_PRICE_PLUS")  # £4.99
-STRIPE_PRICE_PRO       = os.getenv("STRIPE_PRICE_PRO")   # £7.99
-PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
+STRIPE_PRICE_PLUS      = os.getenv("STRIPE_PRICE_PLUS")  # £4.99 monthly
+STRIPE_PRICE_PRO       = os.getenv("STRIPE_PRICE_PRO")   # £7.99 monthly
 
-stripe.api_key = STRIPE_SECRET_KEY
-
-# FastAPI
-app = FastAPI(title=APP_NAME)
-SECRET_KEY = os.getenv("APP_SECRET_KEY", "dev-secret-change-me")
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten for prod
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# ============== Password hashing ==============
-try:
-    import bcrypt
-    def hash_password(p: str) -> str:
-        return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
-    def check_password(p: str, h: str) -> bool:
-        try:
-            return bcrypt.checkpw(p.encode(), h.encode())
-        except Exception:
-            return False
-except Exception:
-    import hashlib
-    print("⚠ bcrypt not found — using SHA256 fallback (dev only)")
-    def hash_password(p: str) -> str:
-        return hashlib.sha256(p.encode()).hexdigest()
-    def check_password(p: str, h: str) -> bool:
-        return hashlib.sha256(p.encode()).hexdigest() == h
-
-# ============== DB ==============
-DB_PATH = os.getenv("APP_DB_PATH", "app.db")
-
-def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def table_has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(c["name"] == col for c in cols)
-
-def init_db():
-    conn = db(); cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            display_name TEXT,
-            stripe_customer_id TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS preferences (
-            user_id INTEGER PRIMARY KEY,
-            timezone TEXT DEFAULT 'UTC',
-            dark_mode INTEGER DEFAULT 0,
-            notifications INTEGER DEFAULT 1,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            mood TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    """)
-    # Subscriptions
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            user_id INTEGER PRIMARY KEY,
-            plan TEXT NOT NULL DEFAULT 'free',              -- free | plus | pro
-            stripe_subscription_id TEXT,
-            status TEXT,                                    -- active, trialing, past_due, canceled, unpaid, incomplete, incomplete_expired
-            current_period_end TEXT,
-            started_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit(); conn.close()
-init_db()
-
-# ============== Plans ==============
-PLANS = {
+# ===== Plans / feature flags =====
+PLANS: Dict[str, Dict[str, Any]] = {
     "free": {
         "name": "Free",
         "price": "£0",
         "chat_daily": 15,
-        "memory_limit": 100,
-        "allow_search": False,
-        "allow_export": False,
-        "allow_mood": False,
+        "mem_limit": 100,
+        "allow_export_csv": False,
+        "context_notes": 10,
         "model": OPENAI_MODEL_FREE,
-        "max_tokens": 300,
-        "context_notes": 4,
+        "max_tokens": 350,
+        "coach_daily": 1,     # guided coaching starts/day
     },
     "plus": {
         "name": "Plus",
         "price": "£4.99/mo",
         "chat_daily": 200,
-        "memory_limit": 1000,
-        "allow_search": True,
-        "allow_export": True,
-        "allow_mood": True,
+        "mem_limit": 1000,
+        "allow_export_csv": True,
+        "context_notes": 18,
         "model": OPENAI_MODEL_PLUS,
-        "max_tokens": 800,
-        "context_notes": 8,
+        "max_tokens": 900,
+        "coach_daily": 3,
     },
     "pro": {
         "name": "Pro",
         "price": "£7.99/mo",
         "chat_daily": 2000,
-        "memory_limit": 10000,
-        "allow_search": True,
-        "allow_export": True,
-        "allow_mood": True,
+        "mem_limit": 10000,
+        "allow_export_csv": True,
+        "context_notes": 28,
         "model": OPENAI_MODEL_PRO,
-        "max_tokens": 2000,
-        "context_notes": 12,
+        "max_tokens": 2200,
+        "coach_daily": 10,
     },
 }
-PRICE_TO_PLAN = {}  # filled after startup from env
 
-def env_prices_loaded() -> bool:
+# ===== System prompts =====
+SYSTEM_PROMPT = (
+    "You are Kind Coach, a person-centred, strengths-based personal coach. "
+    "You are not a therapist. If the user mentions self-harm or danger, suggest UK Samaritans (116 123), "
+    "NHS 111, or 999 in an emergency. Reflect the user's language, ask short, powerful questions, "
+    "offer 1-2 practical next steps, and keep answers concise."
+)
+COACHING_STYLE = (
+    "Coaching style: solution-focused, values-led, growth mindset, SMART goals. "
+    "Prefer questions to advice. Keep replies under ~200 words unless asked."
+)
+
+# ===== OpenAI client =====
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+        LLM_READY = True
+    except Exception as e:
+        print("OpenAI init error:", e, file=sys.stderr)
+        _client = None
+        LLM_READY = False
+else:
+    _client = None
+    LLM_READY = False
+    print("⚠ OPENAI_API_KEY not set.", file=sys.stderr)
+
+# ===== Stripe client =====
+PRICE_TO_PLAN: Dict[str, str] = {}
+try:
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+    STRIPE_READY = bool(STRIPE_SECRET_KEY)
+except Exception as e:
+    print("Stripe init error:", e, file=sys.stderr)
+    STRIPE_READY = False
+
+def prices_loaded() -> bool:
     return bool(STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO)
 
-# ============== Session / helpers ==============
+def map_price_to_plan(price_id: str) -> Optional[str]:
+    if not PRICE_TO_PLAN:
+        if STRIPE_PRICE_PLUS: PRICE_TO_PLAN[STRIPE_PRICE_PLUS] = "plus"
+        if STRIPE_PRICE_PRO:  PRICE_TO_PLAN[STRIPE_PRICE_PRO]  = "pro"
+    return PRICE_TO_PLAN.get(price_id)
+
+# ===== Session helpers (server sessions) =====
 def current_user_id(request: Request) -> Optional[int]:
     return request.session.get("user_id")
 
-def require_login(request: Request) -> Optional[RedirectResponse]:
-    if not current_user_id(request):
-        return RedirectResponse(url="/login", status_code=303)
-    return None
-
-def get_user(uid: int) -> Optional[sqlite3.Row]:
+def get_user(uid: Optional[int]) -> Optional[sqlite3.Row]:
     if not uid: return None
     conn = db()
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    r = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
     conn.close()
-    return user
+    return r
+
+# ===== DB migrations for billing =====
+def ensure_billing_tables():
+    conn = db()
+    cur = conn.cursor()
+    # add stripe_customer_id if missing
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(users)")]
+    if "stripe_customer_id" not in cols:
+        cur.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+    # subscriptions table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            plan TEXT NOT NULL DEFAULT 'free',
+            stripe_subscription_id TEXT,
+            status TEXT,
+            current_period_end INTEGER,
+            started_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit(); conn.close()
+
+ensure_billing_tables()
 
 def ensure_subscription_row(uid: int):
     conn = db()
-    row = conn.execute("SELECT user_id FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()
-    if not row:
+    r = conn.execute("SELECT user_id FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
+    if not r:
         conn.execute(
             "INSERT INTO subscriptions (user_id, plan, status, started_at) VALUES (?, 'free', 'active', ?)",
             (uid, datetime.utcnow().isoformat()),
@@ -206,369 +296,792 @@ def set_plan(uid: int, plan: str, sub_id: Optional[str] = None, status: Optional
     conn = db()
     conn.execute("""
         INSERT INTO subscriptions (user_id, plan, stripe_subscription_id, status, current_period_end, started_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET plan=excluded.plan,
-                      stripe_subscription_id=excluded.stripe_subscription_id,
-                      status=excluded.status,
-                      current_period_end=excluded.current_period_end
-    """, (uid, plan, sub_id, status, (str(cpe) if cpe else None), datetime.utcnow().isoformat()))
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          plan=excluded.plan,
+          stripe_subscription_id=excluded.stripe_subscription_id,
+          status=excluded.status,
+          current_period_end=excluded.current_period_end
+    """, (uid, plan, sub_id, status, cpe, datetime.utcnow().isoformat()))
     conn.commit(); conn.close()
 
-def get_subscription(uid: int) -> str:
+def get_subscription(uid: Optional[int]) -> str:
+    if not uid: return "free"
     conn = db()
-    row = conn.execute("SELECT plan, status FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()
+    r = conn.execute("SELECT plan, status FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
     conn.close()
-    # Treat inactive/ended subs as free
-    if not row: return "free"
-    plan, status = row["plan"], (row["status"] or "")
-    if plan in ("plus", "pro") and status not in ("active", "trialing", "past_due"):
+    if not r: return "free"
+    plan, status = r["plan"], (r["status"] or "")
+    if plan in ("plus","pro") and status not in ("active","trialing","past_due"):
         return "free"
     return plan if plan in PLANS else "free"
 
-def plan_cfg(uid: int) -> Tuple[str, Dict[str, Any]]:
-    plan = get_subscription(uid)
-    return plan, PLANS[plan]
+def plan_cfg(uid: Optional[int]) -> Tuple[str, Dict[str, Any]]:
+    p = get_subscription(uid)
+    return p, PLANS[p]
 
-def todays_bounds_utc() -> Tuple[str, str]:
-    today = date.today().isoformat()
-    return f"{today}T00:00:00", f"{today}T23:59:59"
+# ===== Feature helpers =====
+def memories_count(uid: Optional[int]) -> int:
+    if not uid: return 0
+    conn = db()
+    cnt = conn.execute("SELECT COUNT(*) AS c FROM user_memories WHERE user_id=?", (uid,)).fetchone()["c"]
+    conn.close()
+    return int(cnt)
 
-def chat_messages_today(uid: int) -> int:
-    start, end = todays_bounds_utc()
+def day_bounds_epoch(tz_name: str) -> Tuple[float, float]:
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    start = datetime(now.year, now.month, now.day, 0,0,0, tzinfo=tz)
+    end   = datetime(now.year, now.month, now.day, 23,59,59, tzinfo=tz)
+    return start.timestamp(), end.timestamp()
+
+def chat_messages_today(uid: Optional[int]) -> int:
+    if not uid: return 0
+    start, end = day_bounds_epoch(APP_TZ)
     conn = db()
     cnt = conn.execute("""
-        SELECT COUNT(*) as c
-        FROM memory
-        WHERE user_id = ? AND title = 'Chat note'
-          AND created_at BETWEEN ? AND ?
+        SELECT COUNT(*) AS c
+        FROM messages m
+        JOIN sessions s ON s.id = m.session_id
+        WHERE s.user_id = ? AND m.role='user' AND m.ts BETWEEN ? AND ?
     """, (uid, start, end)).fetchone()["c"]
     conn.close()
     return int(cnt)
 
-def memory_count(uid: int) -> int:
+def coaching_sessions_today(uid: Optional[int]) -> int:
+    if not uid: return 0
+    start, end = day_bounds_epoch(APP_TZ)
     conn = db()
-    cnt = conn.execute("SELECT COUNT(*) as c FROM memory WHERE user_id = ?", (uid,)).fetchone()["c"]
+    cnt = conn.execute("""
+        SELECT COUNT(*) AS c FROM coaching
+        WHERE user_id = ? AND created_at BETWEEN ? AND ?
+    """, (uid, datetime.fromtimestamp(start).isoformat(), datetime.fromtimestamp(end).isoformat())).fetchone()["c"]
     conn.close()
     return int(cnt)
 
-# ============== LLM ==============
-_client = None
-_llm_ready = bool(OPENAI_API_KEY)
-if _llm_ready:
-    try:
-        from openai import OpenAI  # type: ignore
-        _client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as e:
-        print("⚠ Could not init OpenAI client:", e)
-        _llm_ready = False
-
-def fetch_recent_memories(uid: int, limit: int) -> List[Dict[str, Any]]:
+def get_user_memories_text(uid: Optional[int], limit: int) -> Optional[str]:
+    if not uid: return None
     conn = db()
     rows = conn.execute(
-        "SELECT title, content, updated_at FROM memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
-        (uid, limit),
+        "SELECT note, created_at FROM user_memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+        (uid, limit)
     ).fetchall()
     conn.close()
-    return [{"title": r["title"], "content": r["content"], "updated_at": r["updated_at"]} for r in rows]
+    if not rows: return None
+    bullets = "\n".join(f"- {r['note']}" for r in rows)
+    return "User-approved memory notes:\n" + bullets
 
-def llm_reply(uid: int, user_text: str) -> str:
-    plan, cfg = plan_cfg(uid)
-    name = (get_user(uid) or {}).get("display_name") or "friend"
-    memories = fetch_recent_memories(uid, limit=cfg["context_notes"])
-    mem_bullets = "\n".join(f"- {m['title']}: {m['content'][:180].strip()}" for m in memories) or "- (no saved notes yet)"
-
-    system = (
-        "You are Coffee Chat, a gentle, supportive companion. "
-        "Be concise, warm, and practical. If the user asks for help, suggest one small next step."
-    )
-    context = (
-        f"User goes by: {name}\nRecent notes:\n{mem_bullets}\n"
-        "Only use these notes if they help; otherwise ignore."
-    )
-
-    if not _llm_ready or _client is None:
-        return (
-            "I’m running in local/dev mode without an LLM key. "
-            "Here’s an echo while we get set up:\n\n"
-            f"“{user_text}”\n\nTip: set OPENAI_API_KEY / OPENAI_MODEL_* for real replies."
-        )
-    try:
-        resp = _client.chat.completions.create(
-            model=cfg["model"],
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "system", "content": context},
-                {"role": "user", "content": user_text},
-            ],
-            temperature=0.7,
-            max_tokens=cfg["max_tokens"],
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Sorry, I couldn’t reach the chat service ({e}). Please try again shortly."
-
-# ============== Layout ==============
-def layout(body: str, user: Optional[sqlite3.Row] = None, title: str = "Coffee Chat") -> str:
-    dark = False
-    plan_badge = ""
-    if user:
-        uid = user["id"]
-        conn = db()
-        pref = conn.execute("SELECT dark_mode FROM preferences WHERE user_id = ?", (uid,)).fetchone()
-        conn.close()
-        if pref and pref["dark_mode"]:
-            dark = True
-        plan = get_subscription(uid)
-        plan_badge = f"<span class='badge'>{PLANS[plan]['name']}</span>"
-    return f"""<!doctype html>
-<html lang="en" {'data-theme="dark"' if dark else ''}>
-<head>
-<meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{title}</title>
-<style>
-:root {{
-  --bg:#f6f7fb; --card:#fff; --text:#222; --muted:#666; --accent:#6f4e37; --link:#3b82f6; --border:#e5e7eb;
-}}
-[data-theme="dark"] {{
-  --bg:#0f1115; --card:#151821; --text:#eaeff7; --muted:#a5adba; --accent:#c7a17a; --link:#8ab4f8; --border:#2a2f3a;
-}}
-html,body {{ background:var(--bg); color:var(--text); margin:0; padding:0; font-family:system-ui,-apple-system,Segoe UI,Inter,Arial; }}
-.container {{ max-width:980px; margin:0 auto; padding:24px; }}
-.nav {{ display:flex; gap:14px; align-items:center; justify-content:space-between; margin-bottom:16px; }}
-.nav a {{ color:var(--link); text-decoration:none; font-weight:600; }}
-.card {{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:20px; box-shadow:0 6px 20px rgba(0,0,0,0.04); }}
-h1,h2,h3 {{ margin-top:0.2em; }}
-label {{ display:block; margin-top:12px; font-weight:600; }}
-input[type="text"],input[type="email"],input[type="password"],textarea,select {{
-  width:100%; padding:10px; border-radius:10px; border:1px solid var(--border); background:transparent; color:var(--text);
-}}
-button {{ margin-top:14px; padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:var(--accent); color:#fff; font-weight:700; cursor:pointer; }}
-.small {{ color:var(--muted); font-size:.9em; }}
-.hero {{ display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:center; }}
-.hero img {{ width:100%; border-radius:14px; border:1px solid var(--border); }}
-nav .right a {{ margin-left:12px; }}
-ul.clean {{ list-style:none; padding-left:0; }}
-li.item {{ padding:10px 0; border-bottom:1px dashed var(--border); }}
-a.btn-link {{ display:inline-block; margin-top:10px; text-decoration:none; color:#fff; background:var(--link); padding:8px 12px; border-radius:8px; font-weight:700; }}
-.msg {{ white-space:pre-wrap; border:1px solid var(--border); border-radius:12px; padding:12px; margin:8px 0; }}
-.msg.user {{ background:rgba(59,130,246,.08); }}
-.msg.bot  {{ background:rgba(111,78,55,.08); }}
-.badge {{ display:inline-block; margin-left:8px; padding:2px 8px; border-radius:10px; border:1px solid var(--border); font-size:12px; color:var(--muted); }}
-.grid3 {{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }}
-.pricecard .price {{ font-size:28px; font-weight:800; }}
-.notice {{ background:rgba(255,193,7,.12); border:1px solid rgba(255,193,7,.3); padding:10px; border-radius:10px; }}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="nav">
-    <div class="left"><a href="/">☕ Coffee Chat</a> {plan_badge}</div>
-    <div class="right">
-      {"<a href='/chat'>Chat</a> <a href='/memory'>Memory</a> <a href='/preferences'>Preferences</a> <a href='/pricing'>Pricing</a> <a href='/logout'>Log out</a>" if user else "<a href='/pricing'>Pricing</a> <a href='/signup'>Sign up</a> <a href='/login'>Log in</a>"}
-    </div>
-  </div>
-  {body}
-</div>
-</body>
-</html>"""
-
-# ============== Auth & Core Pages ==============
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    uid = current_user_id(request); user = get_user(uid) if uid else None
-    name = user["display_name"] if user and user["display_name"] else "friend"
-    body = f"""
-    <div class="card">
-      <div class="hero">
-        <div>
-          <h1>Welcome {name} 👋</h1>
-          <p class="small">A simple space to say how you feel, jot down thoughts, and keep gentle track of your days.</p>
-          {"<a class='btn-link' href='/chat'>Open Chat</a> <a class='btn-link' href='/memory'>Your Memory</a>" if user else "<a class='btn-link' href='/signup'>Create an account</a> <a class='btn-link' href='/login'>I already have an account</a>"}
-          <a class='btn-link' href='/pricing' style='background:#10b981'>See pricing</a>
-        </div>
-        <img src="/static/coffee-chat.png" alt="Coffee chat" onerror="this.style.display='none'">
-      </div>
-    </div>"""
-    return layout(body, user)
-
-@app.get("/signup", response_class=HTMLResponse)
-def signup_form(request: Request):
-    if current_user_id(request): return RedirectResponse("/", status_code=303)
-    body = """
-    <div class="card">
-      <h2>Create your account</h2>
-      <form method="post" action="/signup">
-        <label>Email</label><input type="email" name="email" required />
-        <label>Password</label><input type="password" name="password" minlength="6" required />
-        <button type="submit">Sign up</button>
-      </form>
-      <p class="small">Already registered? <a href="/login">Log in</a></p>
-    </div>"""
-    return layout(body, None)
-
-@app.post("/signup")
-def signup(request: Request, email: str = Form(...), password: str = Form(...)):
-    conn = db()
-    try:
-        conn.execute(
-            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-            (email.strip().lower(), hash_password(password), datetime.utcnow().isoformat()),
-        )
-        uid = conn.execute("SELECT id FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()["id"]
-        conn.execute("INSERT OR IGNORE INTO preferences (user_id, timezone, dark_mode, notifications) VALUES (?, 'UTC', 0, 1)", (uid,))
-        conn.execute("INSERT OR REPLACE INTO subscriptions (user_id, plan, status, started_at) VALUES (?, 'free', 'active', ?)", (uid, datetime.utcnow().isoformat()))
-        conn.commit()
-        request.session["user_id"] = uid
-        return RedirectResponse("/name", status_code=303)
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        return HTMLResponse(layout("<div class='card'><h3>That email is already registered.</h3><p><a href='/login'>Log in</a> or try another email.</p></div>", None), status_code=400)
-    finally:
-        conn.close()
-
-@app.get("/login", response_class=HTMLResponse)
-def login_form(request: Request):
-    if current_user_id(request): return RedirectResponse("/", status_code=303)
-    body = """
-    <div class="card">
-      <h2>Log in</h2>
-      <form method="post" action="/login">
-        <label>Email</label><input type="email" name="email" required />
-        <label>Password</label><input type="password" name="password" required />
-        <button type="submit">Log in</button>
-      </form>
-      <p class="small">New here? <a href="/signup">Create an account</a></p>
-    </div>"""
-    return layout(body, None)
-
-@app.post("/login")
-def login(request: Request, email: str = Form(...), password: str = Form(...)):
-    conn = db()
-    user = conn.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
-    conn.close()
-    if not user or not check_password(password, user["password_hash"]):
-        return HTMLResponse(layout("<div class='card'><h3>Invalid email or password.</h3><p><a href='/login'>Try again</a></p></div>", None), status_code=401)
-    request.session["user_id"] = user["id"]
-    ensure_subscription_row(user["id"])
-    if not user["display_name"]:
-        return RedirectResponse("/name", status_code=303)
-    return RedirectResponse("/", status_code=303)
-
-@app.get("/logout")
-def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse("/", status_code=303)
-
-@app.get("/name", response_class=HTMLResponse)
-def name_form(request: Request):
-    redir = require_login(request); 
-    if redir: return redir
-    uid = current_user_id(request); user = get_user(uid)
-    body = f"""
-    <div class="card">
-      <h2>Choose how I address you</h2>
-      <form method="post" action="/name">
-        <label>Display name</label>
-        <input type="text" name="display_name" value="{(user['display_name'] or '') if user else ''}" maxlength="50" />
-        <button type="submit">Save name</button>
-      </form>
-    </div>"""
-    return layout(body, user)
-
-@app.post("/name")
-def set_name(request: Request, display_name: str = Form("")):
-    redir = require_login(request); 
-    if redir: return redir
-    uid = current_user_id(request)
-    conn = db()
-    conn.execute("UPDATE users SET display_name = ? WHERE id = ?", (display_name.strip() or None, uid))
-    conn.commit(); conn.close()
-    return RedirectResponse("/", status_code=303)
-
-# ============== Pricing & Billing ==============
-@app.get("/pricing", response_class=HTMLResponse)
-def pricing(request: Request):
-    uid = current_user_id(request); user = get_user(uid) if uid else None
-    current = get_subscription(uid) if uid else "free"
-    warn = "" if env_prices_loaded() else "<div class='notice small'>Stripe price IDs not configured. Set STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO.</div>"
-    cards = []
-    for key in ["free", "plus", "pro"]:
-        p = PLANS[key]
-        features = [
-            f"{p['chat_daily']} chat messages/day",
-            f"{p['memory_limit']} memory notes",
-            ("Memory search" if p['allow_search'] else "No memory search"),
-            ("CSV export" if p['allow_export'] else "No export"),
-            ("Mood on notes" if p['allow_mood'] else "No mood field"),
-        ]
-        feat_html = "".join(f"<li>• {f}</li>" for f in features)
-        if uid:
-            if key == current:
-                cta = "<div class='small'>Current plan</div>"
-            else:
-                if key == "free":
-                    cta = "<div class='small'>You can downgrade in the Billing Portal.</div>"
-                else:
-                    cta = f"<form method='post' action='/billing/checkout'><input type='hidden' name='plan' value='{key}' /><button type='submit'>Subscribe to {p['name']}</button></form>"
-        else:
-            cta = "<a class='btn-link' href='/signup'>Create an account</a>"
-        cards.append(f"""
-        <div class="card pricecard">
-          <h3>{p['name']}</h3>
-          <div class="price">{p['price']}</div>
-          <ul class="clean">{feat_html}</ul>
-          {cta}
-        </div>""")
-    portal_btn = ""
-    if uid:
-        portal_btn = "<form method='post' action='/billing/portal'><button type='submit'>Open Billing Portal</button></form>"
-    body = f"""
-    <div class="card">
-      <h2>Choose your plan</h2>
-      <p class="small">Manage your subscription any time in the Billing Portal.</p>
-      {portal_btn}
-      {warn}
-    </div>
-    <div class="grid3">{''.join(cards)}</div>"""
-    return layout(body, user, title="Pricing — Coffee Chat")
-
-def get_or_create_stripe_customer(user: sqlite3.Row) -> str:
-    # reuse if stored
-    if user["stripe_customer_id"]:
-        return user["stripe_customer_id"]
-    if not STRIPE_SECRET_KEY:
-        raise RuntimeError("Stripe not configured")
-    # create customer
-    cust = stripe.Customer.create(email=user["email"], metadata={"app_user_id": str(user["id"])})
-    conn = db()
-    conn.execute("UPDATE users SET stripe_customer_id = ? WHERE id = ?", (cust.id, user["id"]))
-    conn.commit(); conn.close()
-    return cust.id
-
-def plan_to_price_id(plan: str) -> Optional[str]:
-    if plan == "plus":
-        return STRIPE_PRICE_PLUS
-    if plan == "pro":
-        return STRIPE_PRICE_PRO
+def crisis_guard(text: str) -> Optional[str]:
+    lowered = text.lower()
+    for k in ["suicide","kill myself","self-harm","end my life","overdose","hurt myself"]:
+        if k in lowered:
+            return ("I'm really glad you reached out. You deserve support.\n\n"
+                    "If you're in the UK, you can call **Samaritans 116 123** any time, "
+                    "or visit A&E / call **999** in an emergency.\n"
+                    "I'm here to keep you company, but I'm not a substitute for professional help.")
     return None
 
-def price_id_to_plan(price_id: str) -> Optional[str]:
-    if not PRICE_TO_PLAN:
-        if STRIPE_PRICE_PLUS: PRICE_TO_PLAN[STRIPE_PRICE_PLUS] = "plus"
-        if STRIPE_PRICE_PRO:  PRICE_TO_PLAN[STRIPE_PRICE_PRO]  = "pro"
-    return PRICE_TO_PLAN.get(price_id)
+def current_time_note():
+    now_local = datetime.now(ZoneInfo(APP_TZ))
+    return f"Today is {now_local.strftime('%A %d %B %Y')} and the local time is {now_local.strftime('%H:%M')} in {APP_TZ}."
 
+def llm_chat(model: str, max_tokens: int, messages: List[Dict[str, str]]) -> str:
+    if not LLM_READY or _client is None:
+        return "LLM is not configured. Set OPENAI_API_KEY."
+    try:
+        resp = _client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        return f"(LLM error: {e})"
+# app.py (Chunk 3 of 5) — UI pages, Auth, Preferences, Memories
+LANDING_HTML = r"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Kind Coach — Person-Centred Coaching</title>
+<link rel="icon" href="/static/favicon.ico">
+<style>
+body{margin:0;font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#f4fdf6;color:#111b21;text-align:center}
+header{background:#25d366;color:#fff;padding:2rem 1rem}
+header h1{margin:0;font-size:2.1rem}
+.hero img{max-width:820px;width:92%;height:auto;margin:2rem auto;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.btn{background:#25d366;border:none;color:#fff;padding:1rem 1.4rem;border-radius:999px;cursor:pointer;font-weight:700}
+.btn.alt{background:#fff;color:#073;border:1px solid #d1d7db}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:1100px;margin:1rem auto 2rem;padding:0 16px}
+.card{background:#fff;border:1px solid #d1d7db;border-radius:16px;padding:16px;box-shadow:0 6px 20px rgba(0,0,0,.06)}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+</style></head><body>
+<header><h1>Kind Coach</h1><p>Friendly AI coaching with a person-centred touch</p></header>
+<div class="hero"><img src="/static/coffee_chat.jpg" alt="Coaching conversation"></div>
+<div class="grid">
+  <div class="card"><h3>Guided Coaching</h3><p>Short, powerful questions to unlock momentum.</p></div>
+  <div class="card"><h3>Daily Reflections</h3><p>Gentle prompts to reflect, learn and reset.</p></div>
+  <div class="card"><h3>Privacy First</h3><p>You control what’s remembered. Delete anytime.</p></div>
+</div>
+<p>
+  <button class="btn" onclick="location.href='/app?mode=signup'">Try free</button>
+  <button class="btn alt" onclick="location.href='/pricing'">Pricing</button>
+  <button class="btn alt" onclick="location.href='/app'">Open app</button>
+</p>
+</body></html>
+"""
+
+# Main app (keeps your WhatsApp-y look, adds Coaching button)
+APP_HTML = r"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Kind Coach</title><link rel="icon" href="/static/favicon.ico">
+<style>
+:root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--chatbg:#e7f0ea;--me:#d9fdd3;--bot:#ffffff;--br:#d1d7db;--panel:#ffffff;--shadow:0 6px 24px rgba(0,0,0,.12)}
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg)}
+.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,var(--gd),var(--g));color:#fff;box-shadow:var(--shadow)}
+.logo{width:36px;height:36px;border-radius:10px;background:var(--acc);display:grid;place-items:center;color:#073;font-weight:800}
+.brand{font-weight:800}.grow{flex:1 1 auto}
+.chip{font-size:12px;color:#eafff0;background:rgba(255,255,255,.15);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.25)}
+.tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
+.tb-btn.primary{background:#fff;color:#073}
+.app{display:grid;grid-template-columns:340px 1fr;height:100svh;overflow:hidden}
+@media(max-width:1000px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+.sidebar{display:flex;flex-direction:column;height:calc(100svh - 60px);border-right:1px solid var(--br);background:var(--panel)}
+.side-head{display:flex;gap:8px;align-items:center;padding:12px;border-bottom:1px solid var(--br)}
+.side-actions{display:flex;gap:8px;padding:12px;flex-wrap:wrap}
+.list{overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:8px}
+.item{padding:10px 12px;background:#fff;border:1px solid var(--br);border-radius:12px;cursor:pointer}
+.item.active{outline:2px solid var(--acc)}
+.main{display:flex;flex-direction:column;height:calc(100svh - 60px);background:var(--chatbg);position:relative}
+.chatbar{display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--br);background:var(--panel);padding:10px 12px;flex-wrap:wrap}
+.chat{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 16px;display:grid;gap:8px}
+.row{display:grid;grid-template-columns:auto 1fr;gap:8px;align-items:end}
+.row.user{grid-template-columns:1fr auto}.row.user .avatar{display:none}
+.avatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;background:var(--g);font-weight:800}
+.bubble{max-width:70ch;padding:10px 12px;border-radius:16px;color:var(--txt);white-space:pre-wrap;word-wrap:anywhere;box-shadow:0 1px 0 rgba(0,0,0,.08);border:1px solid var(--br)}
+.row.user .bubble{background:var(--me)} .row.bot .bubble{background:var(--bot)}
+.meta{display:flex;gap:8px;align-items:center;color:var(--mut);font-size:11px;margin-top:4px}
+.composer{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px;border-top:1px solid var(--br);background:var(--panel)}
+.input{padding:12px 14px;border-radius:999px;border:1px solid var(--br);background:#fff;color:var(--txt)}
+.send{background:var(--g);color:#fff;border:none;padding:10px 16px;border-radius:999px;cursor:pointer}
+.modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40}
+.modal{display:none;position:fixed;inset:0;z-index:50;place-items:center}
+.modal.on,.modal-backdrop.on{display:grid}
+.modal-card{width:min(560px,94vw);background:#fff;color:var(--txt);border:1px solid var(--br);border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:16px}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.modal-title{font-weight:800;font-size:16px}
+.xbtn{border:1px solid var(--br);background:#fff;color:var(--txt);border-radius:10px;padding:6px 10px;cursor:pointer}
+.form-row{display:grid;gap:6px;margin:10px 0}
+.form-row input{padding:10px 12px;border-radius:12px;border:1px solid var(--br);background:#fff;color:var(--txt)}
+.form-actions{display:flex;gap:8px;justify-content:flex-end}
+.badge{background:#fff;color:#073;border:1px solid #d1d7db;border-radius:999px;padding:4px 10px;font-size:12px}
+</style></head><body>
+  <div class="topbar">
+    <div class="logo">KC</div>
+    <div class="brand">Kind Coach</div>
+    <div class="grow"></div>
+    <span class="chip" id="plan-chip">Free</span>
+    <span class="chip" id="me">Not signed in</span>
+    <button id="download-txt" class="tb-btn">.txt</button>
+    <button id="download-csv" class="tb-btn">.csv</button>
+    <button id="open-pricing" class="tb-btn">Pricing</button>
+    <button id="open-settings" class="tb-btn">Settings</button>
+  </div>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-head"><div style="font-weight:700;">Your Space</div></div>
+      <div class="side-actions">
+        <button id="new-chat" class="tb-btn primary">New chat</button>
+        <button id="coach-daily" class="tb-btn">Daily reflection</button>
+        <button id="coach-start" class="tb-btn">Start coaching</button>
+      </div>
+      <div class="list" id="sessions"></div>
+    </aside>
+
+    <main class="main">
+      <div class="chatbar">
+        <div class="auth" id="auth" style="display:flex;gap:8px;align-items:center;">
+          <button id="open-auth" class="tb-btn primary">Sign in / up</button>
+          <button id="logout" class="tb-btn" style="display:none;">Log out</button>
+          <span id="limits" class="badge"></span>
+        </div>
+      </div>
+      <section class="chat" id="chat"></section>
+      <div class="composer">
+        <input id="message" class="input" autocomplete="off" placeholder="Sign in to start" disabled />
+        <button id="send" class="send" disabled>Send</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- Auth Modal -->
+  <div class="modal-backdrop" id="auth-backdrop"></div>
+  <div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="modal-card">
+      <div class="modal-header"><div class="modal-title" id="auth-title">Welcome</div><button class="xbtn" id="auth-close">Close</button></div>
+      <div class="tabs" style="display:flex;gap:8px;margin-bottom:8px;">
+        <button id="tab-login"  class="tb-btn" aria-selected="true">Log in</button>
+        <button id="tab-signup" class="tb-btn">Sign up</button>
+      </div>
+      <div id="pane-login">
+        <div class="form-row"><label>Email</label><input id="login-email" placeholder="you@example.com"/></div>
+        <div class="form-row"><label>Password</label><input id="login-password" type="password" placeholder="••••••••"/></div>
+        <div class="form-actions"><button class="xbtn" id="login-cancel">Cancel</button><button class="tb-btn primary" id="login-submit">Log in</button></div>
+      </div>
+      <div id="pane-signup" style="display:none;">
+        <div class="form-row"><label>Email</label><input id="signup-email" placeholder="you@example.com"/></div>
+        <div class="form-row"><label>Password</label><input id="signup-password" type="password" placeholder="Create a password"/></div>
+        <div class="form-actions"><button class="xbtn" id="signup-cancel">Cancel</button><button class="tb-btn primary" id="signup-submit">Create account</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop" id="settings-backdrop"></div>
+  <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card">
+      <div class="modal-header"><div class="modal-title" id="settings-title">Account & Preferences</div><button class="xbtn" id="settings-close">Close</button></div>
+      <div class="form-row"><label>Display name</label><input id="display-name" placeholder="e.g., Alex"/></div>
+      <div class="form-actions" style="justify-content:flex-start;margin-bottom:12px;"><button class="tb-btn primary" id="save-display-name">Save name</button></div>
+      <hr style="border:none;border-top:1px solid #d1d7db;margin:8px 0 12px;">
+      <div class="form-row"><label>Add a memory</label><input id="new-memory" placeholder="e.g., I prefer short replies"/></div>
+      <div class="form-actions" style="justify-content:flex-start"><button class="tb-btn primary" id="add-memory">Add memory</button></div>
+      <div class="form-row"><label>Saved memories</label><div id="memories-list" style="display:flex;flex-direction:column;gap:6px;"></div></div>
+    </div>
+  </div>
+
+<script>
+const chat=document.getElementById('chat'); const input=document.getElementById('message'); const send=document.getElementById('send');
+const sessionsEl=document.getElementById('sessions'); const meSpan=document.getElementById('me'); const planChip=document.getElementById('plan-chip');
+const limits=document.getElementById('limits');
+
+function md(x){const esc=x.replace(/[&<>]/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); const withLinks=esc.replace(/(https?:\/\/\\S+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>'); return withLinks.replace(/\\n/g,'<br/>');}
+function addBubble(text, who){const row=document.createElement('div'); row.className='row '+who; const av=document.createElement('div'); av.className='avatar'; av.textContent=(who==='bot'?'KC':'You'); const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(text); const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); if(who==='bot'){row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);} else {const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); row.style.gridTemplateColumns='1fr auto';} chat.appendChild(row); chat.scrollTop=chat.scrollHeight;}
+function makeBotBubble(initial='…'){const row=document.createElement('div'); row.className='row bot'; const av=document.createElement('div'); av.className='avatar'; av.textContent='KC'; const b=document.createElement('div'); b.className='bubble'; b.textContent=initial; const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); chat.appendChild(row); chat.scrollTop=chat.scrollHeight; return b;}
+
+async function refreshMe(){const r=await fetch('/api/me'); const d=await r.json(); if(d.user){ input.disabled=false; send.disabled=false; input.placeholder="Type a message"; meSpan.textContent = d.user.display_name || d.user.email; } else { input.disabled=true; send.disabled=true; input.placeholder="Sign in to start"; meSpan.textContent="Not signed in"; }}
+async function refreshLimits(){const r=await fetch('/api/limits'); const d=await r.json(); planChip.textContent=`${d.plan_name}`; limits.textContent=`Chat ${d.used_today}/${d.chat_daily} • Coach ${d.coach_used}/${d.coach_daily}`; document.getElementById('download-csv').disabled=!d.allow_export_csv;}
+
+document.getElementById('open-pricing').onclick=()=>location.href='/pricing';
+document.getElementById('download-txt').onclick=()=>{location.href='/api/export?fmt=txt';};
+document.getElementById('download-csv').onclick=()=>{location.href='/api/export?fmt=csv';};
+
+async function loadSessions(){const r=await fetch('/api/sessions'); const data=await r.json(); sessionsEl.innerHTML=''; (data.sessions||[]).forEach(s=>{ const el=document.createElement('div'); el.className='item'+(data.active===s.id?' active':''); el.textContent=s.title||'Untitled'; el.onclick=async()=>{ await fetch('/api/session/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:s.id})}); await loadHistory(); await loadSessions(); }; sessionsEl.appendChild(el); });}
+async function loadHistory(){const r=await fetch('/api/history'); const data=await r.json(); chat.innerHTML=''; (data.messages||[]).forEach(m=>addBubble(m.content, m.role==='assistant'?'bot':'user'));}
+async function sendMessage(){
+  const msg = input.value.trim(); if(!msg) return;
+  input.value=''; addBubble(msg,'user');
+
+  const res = await fetch('/api/chat/stream', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message: msg})
+  });
+
+  if(res.status===401){ openAuth('login'); return; }
+  if(!res.ok){ addBubble('Error: '+(await res.text()),'bot'); return; }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', acc = '';
+  const bubbleEl = makeBotBubble('…');
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    const parts = buf.split("\n\n");          // FIX: real newline splitter
+    buf = parts.pop() || '';
+
+    for (const part of parts) {
+      if (!part.startsWith('data:')) continue;
+      const raw = part.slice(5);              // FIX: don't trim away spaces
+      if (raw.trim() === '[DONE]') continue;
+      const chunk = raw.replace(/\\n/g, '\n'); // FIX: turn "\n" into real newlines
+      acc += chunk;
+      bubbleEl.innerHTML = md(acc);
+      chat.scrollTop = chat.scrollHeight;
+    }
+  }
+
+  await refreshLimits();
+}
+
+
+document.getElementById('login-submit').onclick=async()=>{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:le.value,password:lp.value})}); const d=await r.json(); if(!r.ok){alert(d.error||'Login failed'); return;} closeAuth(); addBubble('Signed in.','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory();};
+document.getElementById('signup-submit').onclick=async()=>{const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:se.value,password:sp.value})}); const d=await r.json(); if(!r.ok){alert(d.error||'Signup failed'); return;} closeAuth(); addBubble('Account created. 👋','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory();};
+document.getElementById('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST'}); addBubble('Signed out.','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); chat.innerHTML='';};
+
+const settingsModal=document.getElementById('settings-modal'); const settingsBackdrop=document.getElementById('settings-backdrop'); const settingsClose=document.getElementById('settings-close'); const openSettingsBtn=document.getElementById('open-settings');
+const displayNameInput=document.getElementById('display-name'); const saveDisplayNameBtn=document.getElementById('save-display-name');
+const newMemoryInput=document.getElementById('new-memory'); const addMemoryBtn=document.getElementById('add-memory'); const memoriesList=document.getElementById('memories-list');
+
+function openSettings(){settingsModal.classList.add('on'); settingsBackdrop.classList.add('on'); fetch('/api/me').then(r=>r.json()).then(d=>{ if(d.user){ displayNameInput.value=d.user.display_name||''; } }); loadMemories();}
+function closeSettings(){settingsModal.classList.remove('on'); settingsBackdrop.classList.remove('on');}
+openSettingsBtn.onclick=openSettings; settingsClose.onclick=closeSettings; settingsBackdrop.onclick=closeSettings;
+
+async function loadMemories(){memoriesList.innerHTML='Loading...'; const r=await fetch('/api/memories'); if(r.status===401){memoriesList.innerHTML='Sign in to manage memories.'; return;} const d=await r.json(); memoriesList.innerHTML=''; (d.memories||[]).forEach(m=>{ const row=document.createElement('div'); row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center'; const span=document.createElement('span'); span.textContent=m.note; const del=document.createElement('button'); del.className='xbtn'; del.textContent='Delete'; del.onclick=async()=>{ if(!confirm('Delete this memory?')) return; const rr=await fetch('/api/memories/'+m.id,{method:'DELETE'}); const dd=await rr.json(); if(dd.ok){ loadMemories(); } }; row.appendChild(span); row.appendChild(del); memoriesList.appendChild(row); }); if(!memoriesList.innerHTML){ memoriesList.textContent='No memories yet.'; }}
+saveDisplayNameBtn.onclick=async()=>{const name=displayNameInput.value.trim(); if(!name) return alert('Enter a name'); const r=await fetch('/api/user/display_name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:name})}); if(!r.ok){alert('Failed to save'); return;} alert('Saved!'); await refreshMe();};
+addMemoryBtn.onclick=async()=>{const note=newMemoryInput.value.trim(); if(!note) return; const r=await fetch('/api/memories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note})}); const d=await r.json(); if(!r.ok){alert(d.error||'Failed to add'); return;} newMemoryInput.value=''; loadMemories(); refreshLimits();};
+
+document.addEventListener('DOMContentLoaded', async ()=>{ await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory(); const params=new URLSearchParams(location.search); const mode=params.get('mode'); if(mode==='signup'||mode==='login'){openAuth(mode);} });
+</script>
+</body></html>
+"""
+
+PRICING_TOP = r"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Pricing — Kind Coach</title><link rel="icon" href="/static/favicon.ico">
+<style>
+body{margin:0;background:#f0f2f5;color:#111b21;font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,#075E54,#128C7E);color:#fff;box-shadow:0 6px 24px rgba(0,0,0,.12)}
+.logo{width:36px;height:36px;border-radius:10px;background:#25D366;display:grid;place-items:center;color:#073;font-weight:800}
+.brand{font-weight:800}.grow{flex:1 1 auto}
+.tb-btn{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.2);padding:8px 10px;border-radius:999px;cursor:pointer}
+.wrap{max-width:1100px;margin:20px auto;padding:0 16px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:#fff;border:1px solid #d1d7db;border-radius:16px;padding:16px;box-shadow:0 6px 24px rgba(0,0,0,.06)}
+.notice{background:#fff3cd;border:1px solid #ffe69c;border-radius:12px;padding:12px;margin:10px 0;color:#664d03}
+.small{color:#54656f;font-size:13px}
+.price{font-size:24px;font-weight:800;margin-bottom:8px}
+</style></head><body>
+<div class="topbar"><div class="logo">KC</div><div class="brand">Kind Coach · Pricing</div><div class="grow"></div>
+<button onclick="location.href='/'" class="tb-btn">Home</button>
+<button onclick="location.href='/app'" class="tb-btn">Open App</button></div>
+<div class="wrap">
+<div class="card" style="margin-bottom:14px"><h2 style="margin:0 0 6px 0">Choose your plan</h2><p class="small">Secure billing by Stripe. Change or cancel anytime in the Billing Portal.</p>{portal}{warn}</div>
+<div class="grid">
+"""
+PRICING_BOTTOM = r"""</div><p class="small" style="margin-top:14px">50% of proceeds donated to Samaritans.</p></div></body></html>"""
+
+def pricing_card_html(plan_key: str, current: str, signed_in: bool) -> str:
+    p = PLANS[plan_key]
+    feats = [
+        f"{p['chat_daily']} chat messages/day",
+        f"{p['mem_limit']} memories",
+        ("CSV export" if p["allow_export_csv"] else "No CSV export"),
+        f"Daily coaching prompts: {p['coach_daily']}/day",
+        f"Model tuned for {p['name']}",
+    ]
+    ul = "".join(f"<li>• {f}</li>" for f in feats)
+    if not signed_in:
+        cta = "<button class='tb-btn' onclick=\"location.href='/app?mode=signup'\">Sign up to choose</button>"
+    elif plan_key == current:
+        cta = "<span class='small'>Current plan</span>"
+    else:
+        if plan_key == "free":
+            cta = "<form method='post' action='/billing/portal'><button class='tb-btn'>Open Billing Portal</button></form>"
+        else:
+            cta = f"<form method='post' action='/billing/checkout'><input type='hidden' name='plan' value='{plan_key}'/><button class='tb-btn'>Subscribe to {p['name']}</button></form>"
+    return f"<div class='card'><h3>{p['name']}</h3><div class='price'>{p['price']}</div><ul class='small' style='list-style:none;padding-left:0'>{ul}</ul>{cta}</div>"
+
+# -------- Routes: pages --------
+@app.get("/", response_class=HTMLResponse)
+def landing():
+    return HTMLResponse(LANDING_HTML)
+
+@app.get("/app", response_class=HTMLResponse)
+def app_page():
+    return HTMLResponse(APP_HTML)
+
+# -------- Auth APIs (session-based) --------
+@app.post("/api/register")
+async def api_register(request: Request):
+    d = await request.json()
+    email = (d.get("email") or "").strip().lower()
+    password = d.get("password") or ""
+    if not email or not password:
+        return JSONResponse({"error": "Email and password required"}, status_code=400)
+    # create
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (email, password_hash, display_name, created_at) VALUES (?,?,?,?)",
+                    (email, hash_password(password), email.split("@")[0], datetime.utcnow().isoformat()))
+        uid = cur.lastrowid
+        cur.execute("INSERT OR IGNORE INTO preferences (user_id) VALUES (?)", (uid,))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return JSONResponse({"error": "Email already in use"}, status_code=409)
+    finally:
+        conn.close()
+    request.session["user_id"] = uid
+    ensure_subscription_row(uid)
+    # create first chat session
+    _sid = str(uuid.uuid4())
+    conn = db(); conn.execute("INSERT INTO sessions (id, user_id, title, created_at) VALUES (?,?,?,?)",
+                              (_sid, uid, "Welcome", time.time())); conn.commit(); conn.close()
+    return JSONResponse({"ok": True})
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    d = await request.json()
+    email = (d.get("email") or "").strip().lower()
+    password = d.get("password") or ""
+    conn = db()
+    r = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    conn.close()
+    if not r or not check_password(password, r["password_hash"]):
+        return JSONResponse({"error": "Invalid credentials"}, status_code=401)
+    request.session["user_id"] = r["id"]
+    ensure_subscription_row(r["id"])
+    return JSONResponse({"ok": True})
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    request.session.clear()
+    return JSONResponse({"ok": True})
+
+@app.get("/api/me")
+def api_me(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"user": None})
+    u = get_user(uid)
+    plan = get_subscription(uid)
+    return JSONResponse({"user": {"id": u["id"], "email": u["email"], "display_name": u["display_name"]}, "plan": plan})
+
+# -------- Preferences & Memories --------
+@app.post("/api/user/display_name")
+async def api_update_name(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    d = await request.json()
+    name = (d.get("display_name") or "").strip()
+    if not name: return JSONResponse({"error":"Display name required"}, status_code=400)
+    conn = db(); conn.execute("UPDATE users SET display_name=? WHERE id=?", (name, uid)); conn.commit(); conn.close()
+    return JSONResponse({"ok": True})
+
+@app.get("/api/memories")
+def api_list_memories(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    conn = db()
+    rows = conn.execute("SELECT id, note, created_at FROM user_memories WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    conn.close()
+    return JSONResponse({"memories":[{"id":r["id"],"note":r["note"],"created_at":r["created_at"]} for r in rows]})
+
+@app.post("/api/memories")
+async def api_add_memory(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    if memories_count(uid) >= cfg["mem_limit"]:
+        return JSONResponse({"error":"Memory limit reached. Upgrade for more."}, status_code=403)
+    d = await request.json()
+    note = (d.get("note") or "").strip()
+    if not note: return JSONResponse({"error":"Note required"}, status_code=400)
+    mid = str(uuid.uuid4())
+    conn = db(); conn.execute("INSERT INTO user_memories (id,user_id,note,created_at) VALUES (?,?,?,?)",
+                              (mid, uid, note, datetime.utcnow().isoformat())); conn.commit(); conn.close()
+    return JSONResponse({"ok": True, "id": mid})
+    
+@app.delete("/api/memories/{mem_id}")
+def api_delete_memory(request: Request, mem_id: str = Path(...)):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    conn = db(); cur = conn.cursor()
+    cur.execute("DELETE FROM user_memories WHERE id=? AND user_id=?", (mem_id, uid))
+    conn.commit(); conn.close()
+    return JSONResponse({"ok": cur.rowcount > 0})
+# app.py (Chunk 4 of 5) — Sessions, Chat SSE, Coaching, Export, Limits
+from fastapi.responses import StreamingResponse
+
+# -------- Sessions & History --------
+@app.get("/api/sessions")
+def api_sessions(request: Request):
+    uid = current_user_id(request)
+    conn = db()
+    if uid:
+        rows = conn.execute("SELECT id, title, created_at FROM sessions WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    else:
+        rows = []
+    conn.close()
+    active = request.session.get("active_session")
+    return JSONResponse({"sessions":[{"id":r["id"],"title":r["title"],"created_at":r["created_at"]} for r in rows], "active": active})
+
+@app.post("/api/sessions")
+async def api_sessions_create(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    d = await request.json()
+    title = (d.get("title") or "New chat").strip() or "New chat"
+    sid = str(uuid.uuid4())
+    conn = db(); conn.execute("INSERT INTO sessions (id,user_id,title,created_at) VALUES (?,?,?,?)",
+                              (sid, uid, title, time.time())); conn.commit(); conn.close()
+    request.session["active_session"] = sid
+    return JSONResponse({"ok": True, "session_id": sid})
+
+@app.post("/api/session/select")
+async def api_session_select(request: Request):
+    d = await request.json()
+    sid = d.get("session_id")
+    if not sid: return JSONResponse({"error":"session_id required"}, status_code=400)
+    request.session["active_session"] = sid
+    return JSONResponse({"ok": True})
+
+@app.get("/api/history")
+def api_history(request: Request):
+    uid = current_user_id(request)
+    sid = request.session.get("active_session")
+    if not uid or not sid: return JSONResponse({"messages": [], "session_id": None})
+    conn = db()
+    rows = conn.execute("SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)).fetchall()
+    conn.close()
+    return JSONResponse({"messages":[{"role":r["role"],"content":r["content"],"ts":r["ts"]} for r in rows], "session_id": sid})
+
+# -------- Chat SSE --------
+@app.post("/api/chat/stream")
+async def api_chat_stream(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not LLM_READY: return JSONResponse({"error":"LLM not configured"}, status_code=500)
+
+    d = await request.json()
+    msg = (d.get("message") or "").strip()
+    if not msg: return JSONResponse({"error":"Empty message"}, status_code=400)
+
+    # daily limit
+    plan, cfg = plan_cfg(uid)
+    used = chat_messages_today(uid)
+    if used >= cfg["chat_daily"]:
+        def gen_limit():
+            txt = "You've hit today's chat limit. It resets at midnight. See /pricing to upgrade."
+            yield "data: " + txt.replace("\n","\\n") + "\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_limit(), media_type="text/event-stream")
+
+    # ensure session
+    sid = request.session.get("active_session")
+    if not sid:
+        sid = str(uuid.uuid4())
+        conn = db(); conn.execute("INSERT INTO sessions (id,user_id,title,created_at) VALUES (?,?,?,?)",
+                                  (sid, uid, "New chat", time.time())); conn.commit(); conn.close()
+        request.session["active_session"] = sid
+
+    # crisis guard
+    guard = crisis_guard(msg)
+    conn = db()
+    conn.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?,?,?,?)", (sid, "user", msg, time.time()))
+    conn.commit(); conn.close()
+    if guard:
+        conn = db(); conn.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?,?,?,?)",(sid, "assistant", guard, time.time())); conn.commit(); conn.close()
+        def gen_safe():
+            yield "data: " + guard.replace("\n","\\n") + "\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen_safe(), media_type="text/event-stream")
+
+    mem_text = get_user_memories_text(uid, limit=cfg["context_notes"])
+    messages = [
+        {"role":"system","content": SYSTEM_PROMPT},
+        {"role":"system","content": COACHING_STYLE},
+        {"role":"system","content": current_time_note()},
+    ]
+    if mem_text: messages.append({"role":"system","content": mem_text})
+    # include last ~20 turns
+    conn = db()
+    hist = conn.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY ts DESC LIMIT 20", (sid,)).fetchall()
+    conn.close()
+    for r in reversed(hist):
+        messages.append({"role": r["role"], "content": r["content"]})
+    messages.append({"role":"user","content": msg})
+
+    def stream():
+        try:
+            r = _client.chat.completions.create(model=cfg["model"], messages=messages, temperature=0.7, stream=True, max_tokens=cfg["max_tokens"])
+            parts=[]
+            for chunk in r:
+                delta=None
+                try:
+                    delta = chunk.choices[0].delta.content
+                except Exception:
+                    try: delta = chunk.choices[0].message.content
+                    except Exception: delta=None
+                if not delta: continue
+                parts.append(delta)
+                yield "data: " + delta.replace("\n","\\n") + "\n\n"
+            final = "".join(parts)
+            conn = db(); conn.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?,?,?,?)",(sid, "assistant", final, time.time())); conn.commit(); conn.close()
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield "data: " + ("[Error] "+str(e)).replace("\n","\\n") + "\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+# -------- Coaching APIs --------
+DAILY_REFLECTIONS = [
+    "What went well today, and what made it work?",
+    "What small win are you most proud of?",
+    "What felt draining? What’s one tweak for tomorrow?",
+    "What did you learn about yourself today?",
+    "What support would make tomorrow easier?",
+]
+
+@app.get("/api/coaching/daily")
+def api_coaching_daily(request: Request):
+    from random import choice
+    uid = current_user_id(request)
+    # we allow reading the prompt without auth, but encourage sign-in to save
+    prompt = choice(DAILY_REFLECTIONS)
+    return JSONResponse({"prompt": prompt})
+
+@app.post("/api/coaching/start")
+async def api_coaching_start(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    used = coaching_sessions_today(uid)
+    if used >= cfg["coach_daily"]:
+        return JSONResponse({"error":"Coaching session limit reached for today. Upgrade for more."}, status_code=403)
+    d = await request.json()
+    topic = (d.get("topic") or "").strip()
+    if not topic: return JSONResponse({"error":"Topic required"}, status_code=400)
+
+    name = (get_user(uid)["display_name"] or "friend")
+    messages = [
+        {"role":"system","content": SYSTEM_PROMPT},
+        {"role":"system","content": COACHING_STYLE},
+        {"role":"system","content": current_time_note()},
+        {"role":"user","content": f"My coaching topic today: {topic}"},
+        {"role":"assistant","content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences."}
+    ]
+    opening = llm_chat(cfg["model"], 200, messages) or "Let’s begin: what would 'good' look like 7 days from now?"
+    # persist a coaching row
+    conn = db(); conn.execute("INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
+                              (uid, topic, json.dumps({"opening": opening}), datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
+    return JSONResponse({"ok": True, "opening": opening})
+
+@app.post("/api/coaching/save")
+async def api_coaching_save(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    d = await request.json()
+    topic = (d.get("topic") or "").strip()
+    notes = (d.get("notes") or "").strip()
+    if not topic or not notes: return JSONResponse({"error":"topic and notes required"}, status_code=400)
+    conn = db()
+    conn.execute("INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
+                 (uid, topic, notes, datetime.utcnow().isoformat()))
+    conn.commit(); conn.close()
+    return JSONResponse({"ok": True})
+
+@app.get("/api/coaching/list")
+def api_coaching_list(request: Request):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    conn = db()
+    rows = conn.execute("SELECT id, topic, reflections, created_at FROM coaching WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    conn.close()
+    out = [{"id": r["id"], "topic": r["topic"], "reflections": r["reflections"], "created_at": r["created_at"]} for r in rows]
+    return JSONResponse({"items": out})
+
+# -------- Limits + Export --------
+@app.get("/api/limits")
+def api_limits(request: Request):
+    uid = current_user_id(request)
+    plan, cfg = plan_cfg(uid)
+    used = chat_messages_today(uid)
+    coach_used = coaching_sessions_today(uid)
+    remaining = max(cfg["chat_daily"] - used, 0)
+    return JSONResponse({
+        "plan": plan, "plan_name": cfg["name"],
+        "chat_daily": cfg["chat_daily"], "used_today": used, "remaining_today": remaining,
+        "allow_export_csv": cfg["allow_export_csv"],
+        "coach_daily": cfg["coach_daily"], "coach_used": coach_used
+    })
+
+@app.get("/api/export")
+def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
+    uid = current_user_id(request)
+    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    if fmt == "csv" and not cfg["allow_export_csv"]:
+        return JSONResponse({"error":"CSV export is available on Plus & Pro."}, status_code=403)
+    sid = request.session.get("active_session")
+    if not sid: return JSONResponse({"error":"No session"}, status_code=400)
+    conn = db(); rows = conn.execute("SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)).fetchall(); conn.close()
+    now = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
+    if fmt == "txt":
+        lines=[]
+        for r in rows:
+            t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
+            who = "User" if r["role"]=="user" else ("Assistant" if r["role"]=="assistant" else r["role"])
+            lines.append(f"[{t}] {who}: {r['content']}")
+        return PlainTextResponse("\n".join(lines)+"\n",
+            headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.txt"'})
+    # CSV
+    out = io.StringIO(); w = csv.writer(out); w.writerow(["time_utc","role","content"])
+    for r in rows:
+        t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"; w.writerow([t, r["role"], r["content"]])
+    return PlainTextResponse(out.getvalue(),
+        headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.csv"', "Content-Type":"text/csv; charset=utf-8"})
+# app.py (Chunk 5 of 5) — Pricing page, Stripe Checkout/Portal/Webhook, Health
+
+from typing import Optional
+import json, sys, sqlite3
+from fastapi import Request, Query
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+
+# ---- Pricing page ----
+@app.get("/pricing", response_class=HTMLResponse)
+def pricing_page(request: Request):
+    uid = current_user_id(request)
+    signed_in = bool(uid)
+    current = get_subscription(uid)
+    portal = ""
+    if signed_in and STRIPE_READY:
+        portal = "<form method='post' action='/billing/portal'><button class='tb-btn'>Open Billing Portal</button></form>"
+    elif signed_in and not STRIPE_READY:
+        portal = "<div class='notice'>Stripe is not configured.</div>"
+    warn = ""
+    if not prices_loaded():
+        warn = "<div class='notice'>Stripe price IDs not configured (STRIPE_PRICE_PLUS / STRIPE_PRICE_PRO).</div>"
+
+    cards = (
+        pricing_card_html("free", current, signed_in) +
+        pricing_card_html("plus", current, signed_in) +
+        pricing_card_html("pro", current, signed_in)
+    )
+    return HTMLResponse(PRICING_TOP.replace("{portal}", portal).replace("{warn}", warn) + cards + PRICING_BOTTOM)
+
+
+# ---- Stripe helpers ----
+def get_or_create_stripe_customer(user_row: sqlite3.Row) -> str:
+    """
+    Ensure a Stripe Customer exists for the given app user; persist id to users.stripe_customer_id.
+    """
+    if not STRIPE_READY:
+        raise RuntimeError("Stripe not configured")
+    if user_row["stripe_customer_id"]:
+        return user_row["stripe_customer_id"]
+    cust = stripe.Customer.create(email=user_row["email"], metadata={"app_user_id": str(user_row["id"])})
+    conn = db()
+    conn.execute("UPDATE users SET stripe_customer_id=? WHERE id=?", (cust.id, user_row["id"]))
+    conn.commit()
+    conn.close()
+    return cust.id
+
+
+# ---- Checkout / Portal ----
 @app.post("/billing/checkout")
-def billing_checkout(request: Request, plan: str = Form(...)):
-    redir = require_login(request); 
-    if redir: return redir
-    uid = current_user_id(request); user = get_user(uid)
+async def billing_checkout(request: Request):
+    if not STRIPE_READY or not prices_loaded() or not PUBLIC_URL:
+        return HTMLResponse("<h3>Stripe not configured</h3>", status_code=500)
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse("/app?mode=login", status_code=303)
+
+    user = get_user(uid)
+    form = await request.form()
+    plan = (form.get("plan") or "").strip().lower()
     if plan not in ("plus", "pro"):
-        return HTMLResponse(layout("<div class='card'><h3>Unknown plan.</h3></div>", user), status_code=400)
-    price_id = plan_to_price_id(plan)
-    if not (STRIPE_SECRET_KEY and price_id and PUBLIC_URL):
-        return HTMLResponse(layout("<div class='card'><h3>Stripe not configured. Set STRIPE_SECRET_KEY, PUBLIC_URL and STRIPE_PRICE_*.</h3></div>", user), status_code=500)
+        return HTMLResponse("<h3>Unknown plan</h3>", status_code=400)
+
+    price_id = STRIPE_PRICE_PLUS if plan == "plus" else STRIPE_PRICE_PRO
     customer_id = get_or_create_stripe_customer(user)
 
     session = stripe.checkout.Session.create(
@@ -582,87 +1095,78 @@ def billing_checkout(request: Request, plan: str = Form(...)):
     )
     return RedirectResponse(session.url, status_code=303)
 
+
 @app.get("/billing/success", response_class=HTMLResponse)
-def billing_success(request: Request, session_id: str = Query(None)):
-    uid = current_user_id(request); user = get_user(uid) if uid else None
-    info = "<p class='small'>If your payment succeeded, your plan will update automatically.</p>"
-    if STRIPE_SECRET_KEY and session_id:
+def billing_success(session_id: str = Query(None)):
+    msg = "<p class='small'>If your payment succeeded, your plan will update shortly.</p>"
+    if STRIPE_READY and session_id:
         try:
             sess = stripe.checkout.Session.retrieve(session_id, expand=["subscription", "line_items"])
             if sess and sess.subscription:
-                info = "<p class='small'>Subscription created. It may take a few seconds to reflect here.</p>"
+                msg = "<p class='small'>Subscription created. It may take a few seconds to reflect in the app.</p>"
         except Exception:
             pass
-    body = f"""
-    <div class="card">
-      <h2>Thanks!</h2>
-      {info}
-      <p><a href="/pricing">Back to pricing</a></p>
-    </div>"""
-    return layout(body, user)
+    return HTMLResponse(
+        f"<div style='padding:20px;font-family:Inter,system-ui'><h2>Thanks!</h2>{msg}"
+        f"<p><a href='/pricing'>Back to pricing</a> · <a href='/app'>Open app</a></p></div>"
+    )
+
 
 @app.post("/billing/portal")
 def billing_portal(request: Request):
-    redir = require_login(request); 
-    if redir: return redir
-    uid = current_user_id(request); user = get_user(uid)
-    if not STRIPE_SECRET_KEY or not PUBLIC_URL:
-        return HTMLResponse(layout("<div class='card'><h3>Stripe not configured.</h3></div>", user), status_code=500)
-    customer_id = get_or_create_stripe_customer(user)
+    if not STRIPE_READY or not PUBLIC_URL:
+        return HTMLResponse("<h3>Stripe not configured</h3>", status_code=500)
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse("/app?mode=login", status_code=303)
+    user = get_user(uid)
     portal = stripe.billing_portal.Session.create(
-        customer=customer_id,
+        customer=get_or_create_stripe_customer(user),
         return_url=f"{PUBLIC_URL}/pricing",
     )
     return RedirectResponse(portal.url, status_code=303)
 
-# ============== Webhook ==============
+
+# ---- Stripe webhook ----
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
-    if not STRIPE_WEBHOOK_SECRET:
-        # Unsafe: accept all (dev only)
-        payload = await request.body()
-        event = None
-        try:
-            event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
-        except Exception as e:
-            return PlainTextResponse(f"Invalid payload: {e}", status_code=400)
-    else:
-        sig = request.headers.get("stripe-signature")
-        payload = await request.body()
-        try:
-            event = stripe.Webhook.construct_event(
-                payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
-            )
-        except Exception as e:
-            return PlainTextResponse(f"Webhook error: {e}", status_code=400)
+    if not STRIPE_READY:
+        # In dev, silently acknowledge
+        return JSONResponse({"ok": True})
 
-    # Handle
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature")
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET)
+        else:
+            event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
+    except Exception as e:
+        return PlainTextResponse(f"Webhook error: {e}", status_code=400)
+
     etype = event["type"]
     data = event["data"]["object"]
 
-    # Helper: map Stripe customer -> app user
     def find_user_by_customer(customer_id: str) -> Optional[sqlite3.Row]:
         conn = db()
-        row = conn.execute("SELECT * FROM users WHERE stripe_customer_id = ?", (customer_id,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE stripe_customer_id=?", (customer_id,)).fetchone()
         conn.close()
         return row
 
     try:
         if etype in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
-            # On completed checkout, get subscription, map to plan, set subscription row
             sess = data
             customer_id = sess.get("customer")
             sub_id = sess.get("subscription") if isinstance(sess.get("subscription"), str) else (sess.get("subscription") or {}).get("id")
             if customer_id and sub_id:
-                # fetch subscription for price
                 subscription = stripe.Subscription.retrieve(sub_id, expand=["items.data.price"])
                 price_id = subscription["items"]["data"][0]["price"]["id"]
-                plan = price_id_to_plan(price_id) or "free"
+                plan = map_price_to_plan(price_id) or "free"
                 user = find_user_by_customer(customer_id)
                 if user:
                     set_plan(
-                        uid=user["id"],
-                        plan=plan,
+                        user["id"],
+                        plan,
                         sub_id=subscription["id"],
                         status=subscription["status"],
                         cpe=int(subscription["current_period_end"]),
@@ -671,17 +1175,19 @@ async def stripe_webhook(request: Request):
         elif etype in ("customer.subscription.created", "customer.subscription.updated"):
             sub = data
             customer_id = sub.get("customer")
+            # price → plan
             price_id = None
             try:
                 price_id = sub["items"]["data"][0]["price"]["id"]
             except Exception:
                 pass
-            plan = price_id_to_plan(price_id) if price_id else None
+            plan = map_price_to_plan(price_id) if price_id else None
             user = find_user_by_customer(customer_id) if customer_id else None
             if user:
+                effective = (plan or "free") if sub["status"] in ("active", "trialing", "past_due") else "free"
                 set_plan(
-                    uid=user["id"],
-                    plan=(plan or "free") if sub["status"] in ("active", "trialing", "past_due") else "free",
+                    user["id"],
+                    effective,
                     sub_id=sub["id"],
                     status=sub["status"],
                     cpe=int(sub["current_period_end"]) if sub.get("current_period_end") else None,
@@ -692,281 +1198,25 @@ async def stripe_webhook(request: Request):
             customer_id = sub.get("customer")
             user = find_user_by_customer(customer_id) if customer_id else None
             if user:
-                # revert to free on cancel
-                set_plan(uid=user["id"], plan="free", sub_id=None, status="canceled", cpe=None)
+                set_plan(user["id"], "free", sub_id=None, status="canceled", cpe=None)
 
     except Exception as e:
-        # Log error but return 200 so Stripe retries only if genuine failure
-        print("Webhook handling error:", e)
+        print("Webhook handling error:", e, file=sys.stderr)
 
     return JSONResponse({"received": True})
 
-# ============== Memory & Chat with limits ==============
-@app.get("/memory", response_class=HTMLResponse)
-def memory_list(request: Request, q: Optional[str] = Query(None)):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); ensure_subscription_row(uid)
-    plan, cfg = plan_cfg(uid); user = get_user(uid)
 
-    conn = db()
-    if q:
-        if not cfg["allow_search"]:
-            conn.close()
-            return HTMLResponse(layout("<div class='card'><h3>Search is available on Plus & Pro.</h3><p><a href='/pricing'>Upgrade</a></p></div>", user), status_code=403)
-        like = f"%{q.strip()}%"
-        rows = conn.execute(
-            "SELECT id, title, created_at, updated_at, mood FROM memory WHERE user_id = ? AND (title LIKE ? OR content LIKE ?) ORDER BY updated_at DESC",
-            (uid, like, like),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT id, title, created_at, updated_at, mood FROM memory WHERE user_id = ? ORDER BY updated_at DESC",
-            (uid,),
-        ).fetchall()
-    conn.close()
-
-    items = "".join(
-        f"<li class='item'><a href='/memory/{r['id']}'>{r['title']}</a> "
-        f"<span class='small'> — updated {r['updated_at']}{(' • mood: ' + r['mood']) if r['mood'] else ''}</span></li>"
-        for r in rows
-    ) or "<p class='small'>No entries yet.</p>"
-
-    searchbar = ""
-    exportbtn = ""
-    if cfg["allow_search"]:
-        val = q or ""
-        searchbar = f"""
-        <form method="get" action="/memory">
-          <input type="text" name="q" value="{val}" placeholder="Search your notes..." />
-          <button type="submit">Search</button>
-        </form>"""
-    if cfg["allow_export"]:
-        exportbtn = "<a class='btn-link' href='/memory/export'>Export CSV</a>"
-
-    usage = f"<p class='small'>Notes: {memory_count(uid)}/{cfg['memory_limit']}</p>"
-
-    body = f"""
-    <div class="card">
-      <h2>Your Memory</h2>
-      <p class="small">Write short notes, thoughts, or anything you want to remember.</p>
-      <a class='btn-link' href='/memory/new'>New entry</a>
-      {exportbtn}
-      {usage}
-      {searchbar}
-      <ul class="clean">{items}</ul>
-    </div>"""
-    return layout(body, user)
-
-@app.get("/memory/export")
-def memory_export(request: Request):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
-    if not cfg["allow_export"]:
-        return HTMLResponse(layout("<div class='card'><h3>Export is available on Plus & Pro.</h3><p><a href='/pricing'>Upgrade</a></p></div>", get_user(uid)), status_code=403)
-
-    conn = db()
-    rows = conn.execute("SELECT id, title, content, mood, created_at, updated_at FROM memory WHERE user_id = ? ORDER BY created_at ASC", (uid,)).fetchall()
-    conn.close()
-
-    buf = io.StringIO(); writer = csv.writer(buf)
-    writer.writerow(["id", "title", "content", "mood", "created_at", "updated_at"])
-    for r in rows:
-        writer.writerow([r["id"], r["title"], r["content"], r["mood"] or "", r["created_at"], r["updated_at"]])
-    data = buf.getvalue().encode("utf-8-sig")
-    headers = {"Content-Disposition": "attachment; filename=coffee_chat_export.csv"}
-    return Response(content=data, media_type="text/csv; charset=utf-8", headers=headers)
-
-@app.get("/memory/new", response_class=HTMLResponse)
-def memory_new_form(request: Request):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); user = get_user(uid)
-    plan, cfg = plan_cfg(uid)
-    if memory_count(uid) >= cfg["memory_limit"]:
-        return HTMLResponse(layout("<div class='card'><h3>You've reached your note limit.</h3><p><a href='/pricing'>Upgrade</a> to add more.</p></div>", user), status_code=403)
-    mood_field = ""
-    if cfg["allow_mood"]:
-        mood_field = """
-        <label>Mood (optional)</label>
-        <select name="mood">
-          <option value="">--</option>
-          <option value="😊">😊 Positive</option>
-          <option value="😐">😐 Neutral</option>
-          <option value="😟">😟 Low</option>
-        </select>"""
-    body = f"""
-    <div class="card">
-      <h2>New memory</h2>
-      <form method="post" action="/memory/new">
-        <label>Title</label><input type="text" name="title" required maxlength="120" />
-        <label>Content</label><textarea name="content" rows="8" required></textarea>
-        {mood_field}
-        <button type="submit">Save</button>
-      </form>
-    </div>"""
-    return layout(body, user)
-
-@app.post("/memory/new")
-def memory_create(request: Request, title: str = Form(...), content: str = Form(...), mood: str = Form("")):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
-    if memory_count(uid) >= cfg["memory_limit"]:
-        return HTMLResponse(layout("<div class='card'><h3>Note limit reached. Upgrade to add more.</h3><p><a href='/pricing'>Pricing</a></p></div>", get_user(uid)), status_code=403)
-    now = datetime.utcnow().isoformat()
-    conn = db()
-    conn.execute(
-        "INSERT INTO memory (user_id, title, content, mood, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (uid, title.strip(), content.strip(), (mood or None), now, now),
-    )
-    conn.commit()
-    new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    conn.close()
-    return RedirectResponse(f"/memory/{new_id}", status_code=303)
-
-@app.get("/memory/{mid}", response_class=HTMLResponse)
-def memory_detail(request: Request, mid: int):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
-    user = get_user(uid)
-    conn = db()
-    row = conn.execute("SELECT * FROM memory WHERE id = ? AND user_id = ?", (mid, uid)).fetchone()
-    conn.close()
-    if not row:
-        return HTMLResponse(layout("<div class='card'><h3>Not found.</h3></div>", user), status_code=404)
-    mood_field = ""
-    if cfg["allow_mood"]:
-        mv = row["mood"] or ""
-        mood_field = f"""
-        <label>Mood (optional)</label>
-        <select name="mood">
-          <option value="" {'selected' if mv == '' else ''}>--</option>
-          <option value="😊" {'selected' if mv == '😊' else ''}>😊 Positive</option>
-          <option value="😐" {'selected' if mv == '😐' else ''}>😐 Neutral</option>
-          <option value="😟" {'selected' if mv == '😟' else ''}>😟 Low</option>
-        </select>"""
-    body = f"""
-    <div class="card">
-      <h2>Edit memory</h2>
-      <form method="post" action="/memory/{row['id']}">
-        <label>Title</label><input type="text" name="title" value="{row['title']}" required maxlength="120" />
-        <label>Content</label><textarea name="content" rows="10" required>{row['content']}</textarea>
-        {mood_field}
-        <button type="submit" name="action" value="save">Save changes</button>
-        <button type="submit" name="action" value="delete" style="background:#b91c1c">Delete</button>
-      </form>
-      <p class="small">Created {row['created_at']} • Updated {row['updated_at']}{(' • mood: ' + (row['mood'] or '')) if row['mood'] else ''}</p>
-    </div>"""
-    return layout(body, user)
-
-@app.post("/memory/{mid}")
-def memory_update(request: Request, mid: int, action: str = Form(...), title: str = Form(""), content: str = Form(""), mood: str = Form("")):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
-    conn = db()
-    if action == "delete":
-        conn.execute("DELETE FROM memory WHERE id = ? AND user_id = ?", (mid, uid))
-        conn.commit(); conn.close()
-        return RedirectResponse("/memory", status_code=303)
-    now = datetime.utcnow().isoformat()
-    if cfg["allow_mood"]:
-        conn.execute("UPDATE memory SET title=?, content=?, mood=?, updated_at=? WHERE id=? AND user_id=?", (title.strip(), content.strip(), (mood or None), now, mid, uid))
-    else:
-        conn.execute("UPDATE memory SET title=?, content=?, updated_at=? WHERE id=? AND user_id=?", (title.strip(), content.strip(), now, mid, uid))
-    conn.commit(); conn.close()
-    return RedirectResponse(f"/memory/{mid}", status_code=303)
-
-# ============== Chat UI (limits per plan) ==============
-@app.get("/chat", response_class=HTMLResponse)
-def chat_page(request: Request):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); ensure_subscription_row(uid)
-    user = get_user(uid); plan, cfg = plan_cfg(uid)
-    used = chat_messages_today(uid); remaining = max(cfg["chat_daily"] - used, 0)
-    hint = "" if _llm_ready else "<p class='small'>LLM is in local/dev mode. Set <code>OPENAI_API_KEY</code>.</p>"
-    cap_notice = f"<div class='notice small'>Daily messages: {used}/{cfg['chat_daily']}. Remaining: {remaining}.</div>"
-    disabled = "disabled" if remaining <= 0 else ""
-    reached = "<p class='small'>You’ve hit today’s chat limit. It resets at midnight. <a href='/pricing'>Upgrade</a> for more.</p>" if remaining <= 0 else ""
-    body = f"""
-    <div class="card">
-      <h2>Coffee Chat</h2>
-      {cap_notice}{hint}
-      <form method="post" action="/chat">
-        <label>Your message</label>
-        <textarea name="message" rows="5" placeholder="What's on your mind?" required {disabled}></textarea>
-        <button type="submit" {disabled}>Send</button>
-      </form>
-      {reached}
-    </div>"""
-    return layout(body, user)
-
-@app.post("/chat", response_class=HTMLResponse)
-def chat_post(request: Request, message: str = Form(...)):
-    redir = require_login(request)
-    if redir: return redir
-    uid = current_user_id(request); plan, cfg = plan_cfg(uid)
-    used = chat_messages_today(uid)
-    if used >= cfg["chat_daily"]:
-        return HTMLResponse(layout("<div class='card'><h3>Daily chat limit reached.</h3><p><a href='/pricing'>Upgrade</a> for more.</p></div>", get_user(uid)), status_code=403)
-    now = datetime.utcnow().isoformat()
-    conn = db()
-    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Chat note', ?, ?, ?)", (uid, message.strip(), now, now))
-    conn.commit(); conn.close()
-    reply = llm_reply(uid, message)
-    conn = db()
-    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Assistant reply', ?, ?, ?)", (uid, reply, now, datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
-    user = get_user(uid)
-    used_after = chat_messages_today(uid); remaining = max(cfg["chat_daily"] - used_after, 0)
-    cap_notice = f"<div class='notice small'>Daily messages: {used_after}/{cfg['chat_daily']}. Remaining: {remaining}.</div>"
-    body = f"""
-    <div class="card">
-      <h2>Coffee Chat</h2>
-      {cap_notice}
-      <div class="msg user"><strong>You:</strong><br>{message}</div>
-      <div class="msg bot"><strong>Assistant:</strong><br>{reply}</div>
-      <form method="post" action="/chat" style="margin-top:16px">
-        <label>Say more</label>
-        <textarea name="message" rows="4" placeholder="Add a follow-up…" required></textarea>
-        <button type="submit">Send</button>
-      </form>
-      <p class="small">This exchange was saved to your <a href="/memory">Memory</a>.</p>
-    </div>"""
-    return layout(body, user)
-
-# JSON chat API if you build a front-end later
-@app.post("/api/chat")
-def api_chat(request: Request, payload: Dict[str, Any] = None):
-    uid = current_user_id(request)
-    if not uid: return JSONResponse({"error": "not_authenticated"}, status_code=401)
-    plan, cfg = plan_cfg(uid)
-    used = chat_messages_today(uid)
-    if used >= cfg["chat_daily"]:
-        return JSONResponse({"error": "limit_reached"}, status_code=403)
-    data = payload or {}
-    message = (data.get("message") or "").strip()
-    if not message:
-        return JSONResponse({"error": "message_required"}, status_code=400)
-    now = datetime.utcnow().isoformat()
-    conn = db()
-    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Chat note', ?, ?, ?)", (uid, message, now, now))
-    conn.commit(); conn.close()
-    reply = llm_reply(uid, message)
-    conn = db()
-    conn.execute("INSERT INTO memory (user_id, title, content, created_at, updated_at) VALUES (?, 'Assistant reply', ?, ?, ?)", (uid, reply, now, datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
-    return {"reply": reply, "saved": True}
-
-# ============== Health ==============
+# ---- Health ----
 @app.get("/health")
 def health():
     try:
-        conn = db(); conn.execute("SELECT 1"); conn.close()
-        return {"ok": True, "llm_ready": _llm_ready, "stripe": bool(STRIPE_SECRET_KEY)}
+        conn = db()
+        conn.execute("SELECT 1")
+        conn.close()
+        return {
+            "ok": True,
+            "stripe": bool(STRIPE_READY),
+            "prices_loaded": prices_loaded(),
+        }
     except Exception as e:
         return PlainTextResponse(str(e), status_code=500)
