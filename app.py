@@ -881,6 +881,35 @@ async def account_update(request: Request, display_name: str = Form(...)):
     conn.close()
 
     return RedirectResponse(url="/account", status_code=302)
+# Clear all chats and sessions for the logged-in user
+
+@app.post("/account/clear-chats")
+async def clear_chats(request: Request, user=Depends(get_current_user)):
+    if not user:
+        return RedirectResponse(url="/", status_code=303)
+
+    conn = db()
+    cur = conn.cursor()
+
+    # Delete messages first (linked to sessions)
+    cur.execute("""
+        DELETE FROM messages
+        WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ?)
+    """, (user["id"],))
+
+    # Delete sessions
+    cur.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
+
+    # Delete memories
+    cur.execute("DELETE FROM user_memories WHERE user_id = ?", (user["id"],))
+
+    # Delete coaching records
+    cur.execute("DELETE FROM coaching WHERE user_id = ?", (user["id"],))
+
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(url="/account", status_code=303)
 
 @app.post("/account/preferences")
 async def account_preferences(
