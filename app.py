@@ -934,76 +934,91 @@ async def api_chat_stream(request: Request):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 # ---------- Coaching ----------
+# === COACHING APIS — BEGIN ===
+# Single source of truth for all coaching endpoints
+
+from random import choice
+
+# Rotating short prompts for reflection
 DAILY_REFLECTIONS = [
-    "What went well today, and what made it work?",
+    "What went well today, and why?",
     "What small win are you most proud of?",
-    "What felt draining? What’s one tweak for tomorrow?",
+    "What felt draining? One small tweak for tomorrow?",
     "What did you learn about yourself today?",
     "What support would make tomorrow easier?",
 ]
 
 @app.get("/api/coaching/daily")
-def api_coaching_daily():
-    from random import choice
-    return JSONResponse({"prompt": choice(DAILY_REFLECTIONS)})
+def api_coaching_daily(request: Request):
+    """
+    Returns one gentle reflection prompt. No auth required to read,
+    but saving reflections needs auth via the /api/coaching/save route.
+    """
+    prompt = choice(DAILY_REFLECTIONS)
+    return JSONResponse({"prompt": prompt})
+
 
 @app.post("/api/coaching/start")
 async def api_coaching_start(request: Request):
+    """
+    Starts a focused coaching thread on a user-provided topic.
+    Persists a 'coaching' row so you can list/review later.
+    Uses the user's plan/model settings.
+    """
     uid = current_user_id(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    plan, cfg = plan_cfg(uid)
-    used = coaching_sessions_today(uid)
-    if used >= cfg["coach_daily"]:
-        return JSONResponse(
-            {"error": "Coaching session limit reached for today. Upgrade for more."},
-            status_code=403,
-        )
 
     d = await request.json()
     topic = (d.get("topic") or "").strip()
     if not topic:
         return JSONResponse({"error": "Topic required"}, status_code=400)
 
+    # Rate limit by plan (coach_daily)
+    plan, cfg = plan_cfg(uid)
+    used = coaching_sessions_today(uid)
+    if used >= cfg["coach_daily"]:
+        return JSONResponse({"error": "Coaching session limit reached for today. Upgrade for more."}, status_code=403)
+
+    # Build an opening, short, human coaching intro via LLM
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": COACHING_STYLE},
         {"role": "system", "content": current_time_note()},
         {"role": "user", "content": f"My coaching topic today: {topic}"},
-        {
-            "role": "assistant",
-            "content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences.",
-        },
+        {"role": "assistant", "content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences."},
     ]
+    opening = llm_chat(cfg["model"], 200, messages) or \
+        "Let’s begin: what would 'good' look like 7 days from now (one or two sentences)?"
 
-    try:
-        resp = _client.chat.completions.create(
-            model=cfg["model"], messages=messages, temperature=0.7, max_tokens=200
-        )
-        opening = (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        opening = f"(LLM error: {e})"
-
+    # Persist a record in 'coaching'
     conn = db()
     conn.execute(
         "INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
-        (uid, topic, json.dumps({"opening": opening}), datetime.utcnow().isoformat()),
+        (uid, topic, json.dumps({"opening": opening}), datetime.utcnow().isoformat())
     )
     conn.commit()
     conn.close()
+
     return JSONResponse({"ok": True, "opening": opening})
+
 
 @app.post("/api/coaching/save")
 async def api_coaching_save(request: Request):
+    """
+    Save a note or reflection for a coaching topic.
+    Useful for journaling or capturing next steps.
+    """
     uid = current_user_id(request)
     if not uid:
-        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     d = await request.json()
     topic = (d.get("topic") or "").strip()
     notes = (d.get("notes") or "").strip()
     if not topic or not notes:
         return JSONResponse({"error":"topic and notes required"}, status_code=400)
+
     conn = db()
     conn.execute(
         "INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
@@ -1013,22 +1028,30 @@ async def api_coaching_save(request: Request):
     conn.close()
     return JSONResponse({"ok": True})
 
+
 @app.get("/api/coaching/list")
 def api_coaching_list(request: Request):
+    """
+    List a user's recent coaching notes/sessions.
+    """
     uid = current_user_id(request)
     if not uid:
-        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
     conn = db()
     rows = conn.execute(
         "SELECT id, topic, reflections, created_at FROM coaching WHERE user_id=? ORDER BY created_at DESC",
         (uid,)
     ).fetchall()
     conn.close()
+
     out = [
         {"id": r["id"], "topic": r["topic"], "reflections": r["reflections"], "created_at": r["created_at"]}
         for r in rows
     ]
     return JSONResponse({"items": out})
+
+# === COACHING APIS — END ===
 
 # ---------- Limits + Export ----------
 @app.get("/api/limits")
