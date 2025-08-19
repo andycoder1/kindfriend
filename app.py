@@ -279,6 +279,19 @@ def ensure_billing_tables():
     conn.commit(); conn.close()
 
 ensure_billing_tables()
+# --- Preferences columns migration (retain_memories, chat_retention_days) ---
+def ensure_preferences_columns():
+    conn = db()
+    cur = conn.cursor()
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(preferences)")]
+    if "retain_memories" not in cols:
+        cur.execute("ALTER TABLE preferences ADD COLUMN retain_memories INTEGER DEFAULT 1")
+    if "chat_retention_days" not in cols:
+        cur.execute("ALTER TABLE preferences ADD COLUMN chat_retention_days INTEGER DEFAULT 90")
+    conn.commit()
+    conn.close()
+
+ensure_preferences_columns()
 
 def ensure_subscription_row(uid: int):
     conn = db()
@@ -629,6 +642,116 @@ document.addEventListener('DOMContentLoaded', async ()=>{ await refreshMe(); awa
 </script>
 </body></html>
 """
+ACCOUNT_HTML = r"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Account — Kind Coach</title><link rel="icon" href="/static/favicon.ico">
+<style>
+:root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--br:#d1d7db;--panel:#ffffff}
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
+.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,var(--gd),var(--g));color:#fff}
+.logo{width:36px;height:36px;border-radius:10px;background:#25D366;display:grid;place-items:center;color:#073;font-weight:800}
+.brand{font-weight:800}.grow{flex:1 1 auto}
+.tb-btn{background:#fff;color:#073;border:1px solid rgba(0,0,0,.1);padding:8px 10px;border-radius:999px;cursor:pointer}
+.wrap{max-width:1000px;margin:18px auto;padding:0 16px;display:grid;gap:14px}
+.card{background:#fff;border:1px solid var(--br);border-radius:16px;padding:14px}
+.row{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center}
+h3{margin:.2rem 0 .6rem}
+.small{color:var(--mut);font-size:13px}
+ul{list-style:none;padding-left:0}
+li{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px dashed #e6ebef}
+li:last-child{border-bottom:none}
+input[type=number]{width:120px}
+</style></head><body>
+<div class="topbar"><div class="logo">KC</div><div class="brand">Account</div><div class="grow"></div>
+<button class="tb-btn" onclick="location.href='/app'">Back to App</button></div>
+<div class="wrap">
+  <div class="card">
+    <h3>Profile</h3>
+    <div class="row"><label>Display name</label><input id="display-name" placeholder="e.g., Alex"></div>
+    <div class="row"><label>Timezone</label><input id="timezone" placeholder="e.g., Europe/London"></div>
+    <div class="row"><label>Dark mode</label><input id="dark" type="checkbox"></div>
+    <div class="row"><label>Notifications</label><input id="notif" type="checkbox"></div>
+    <div class="row"><label>Retain memories</label><input id="retain" type="checkbox"></div>
+    <div class="row"><label>Chat retention (days)</label><input id="retain_days" type="number" min="0" step="1"></div>
+    <div><button id="save-profile" class="tb-btn">Save changes</button> <span id="msg" class="small"></span></div>
+  </div>
+
+  <div class="card">
+    <h3>Memories</h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input id="new-mem" placeholder="Add a memory to keep" style="flex:1">
+      <button id="add-mem" class="tb-btn">Add</button>
+    </div>
+    <ul id="mem-list" class="small" style="margin-top:8px"></ul>
+  </div>
+
+  <div class="card">
+    <h3>Chats</h3>
+    <ul id="chat-list" class="small"></ul>
+  </div>
+</div>
+<script>
+async function load(){
+  const me = await (await fetch('/api/me')).json();
+  if(!me.user){ location.href='/app?mode=login'; return; }
+  document.getElementById('display-name').value = me.user.display_name || '';
+  const prefs = await (await fetch('/api/preferences')).json();
+  document.getElementById('timezone').value = (prefs.timezone||'') || 'Europe/London';
+  document.getElementById('dark').checked = !!prefs.dark_mode;
+  document.getElementById('notif').checked = !!prefs.notifications;
+  document.getElementById('retain').checked = !!prefs.retain_memories;
+  document.getElementById('retain_days').value = prefs.chat_retention_days ?? 90;
+
+  // memories
+  const mem = await (await fetch('/api/memories')).json();
+  const ul = document.getElementById('mem-list'); ul.innerHTML='';
+  (mem.memories||[]).forEach(m=>{
+    const li=document.createElement('li');
+    li.innerHTML = '<span>'+m.note+'</span>';
+    const b=document.createElement('button'); b.textContent='Delete'; b.className='tb-btn';
+    b.onclick = async()=>{ await fetch('/api/memories/'+m.id,{method:'DELETE'}); load(); };
+    li.appendChild(b); ul.appendChild(li);
+  });
+
+  // chats
+  const s = await (await fetch('/api/sessions')).json();
+  const cl = document.getElementById('chat-list'); cl.innerHTML='';
+  (s.sessions||[]).forEach(ch=>{
+    const li=document.createElement('li');
+    li.innerHTML='<span>'+ch.title+'</span>';
+    const wrap=document.createElement('div');
+    const exp=document.createElement('a'); exp.textContent='.txt'; exp.href='/api/export?fmt=txt&session_id='+ch.id; exp.className='tb-btn';
+    const del=document.createElement('button'); del.textContent='Delete'; del.className='tb-btn';
+    del.onclick = async()=>{ if(!confirm('Delete this chat?')) return; await fetch('/api/sessions/'+ch.id,{method:'DELETE'}); load(); };
+    wrap.appendChild(exp); wrap.appendChild(del); li.appendChild(wrap);
+    cl.appendChild(li);
+  });
+}
+
+document.getElementById('save-profile').onclick = async ()=>{
+  const body = {
+    display_name: document.getElementById('display-name').value,
+    timezone: document.getElementById('timezone').value,
+    dark_mode: document.getElementById('dark').checked ? 1 : 0,
+    notifications: document.getElementById('notif').checked ? 1 : 0,
+    retain_memories: document.getElementById('retain').checked ? 1 : 0,
+    chat_retention_days: parseInt(document.getElementById('retain_days').value||'90',10)
+  };
+  const r = await fetch('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  document.getElementById('msg').textContent = r.ok ? 'Saved.' : 'Failed.';
+  if(r.ok){ await load(); }
+};
+
+document.getElementById('add-mem').onclick = async ()=>{
+  const v = document.getElementById('new-mem').value.trim(); if(!v) return;
+  await fetch('/api/memories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:v})});
+  document.getElementById('new-mem').value=''; load();
+};
+
+load();
+</script>
+</body></html>"""
 
 PRICING_TOP = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -685,6 +808,10 @@ def landing():
 @app.get("/app", response_class=HTMLResponse)
 def app_page():
     return HTMLResponse(APP_HTML)
+
+@app.get("/account", response_class=HTMLResponse)
+def account_page():
+    return HTMLResponse(ACCOUNT_HTML)
 
 # -------- Auth APIs (session-based) --------
 @app.post("/api/register")
