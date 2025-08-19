@@ -23,6 +23,9 @@ from fastapi.responses import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from fastapi import Depends, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 
 # ---------- Password hashing ----------
 try:
@@ -63,6 +66,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 DB_PATH = os.getenv("APP_DB_PATH", "app.db")
 APP_NAME = "Kind Coach"
 APP_TZ = os.getenv("APP_TZ", "Europe/London")
+
+templates = Jinja2Templates(directory="templates")
 
 # ---------- OpenAI ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -163,6 +168,53 @@ COACHING_STYLE = (
 )
 
 # ---------- DB helpers ----------
+def ensure_preferences_schema():
+    conn = db()
+    cur = conn.cursor()
+    # Create table if missing (you already have this in init, but safe to keep)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT DEFAULT 'UTC',
+            dark_mode INTEGER DEFAULT 0,
+            notifications INTEGER DEFAULT 1,
+            save_memories INTEGER DEFAULT 1,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    # Add save_memories if it’s missing
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(preferences)")]
+    if "save_memories" not in cols:
+        cur.execute("ALTER TABLE preferences ADD COLUMN save_memories INTEGER DEFAULT 1")
+    conn.commit()
+    conn.close()
+def get_or_create_preferences(uid: int) -> sqlite3.Row:
+    conn = db()
+    row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        conn.execute("INSERT INTO preferences (user_id) VALUES (?)", (uid,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
+    conn.close()
+    return row
+
+def update_preferences(uid: int, timezone: str, dark_mode: int, notifications: int, save_memories: int):
+    conn = db()
+    conn.execute("""
+        INSERT INTO preferences (user_id, timezone, dark_mode, notifications, save_memories)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          timezone=excluded.timezone,
+          dark_mode=excluded.dark_mode,
+          notifications=excluded.notifications,
+          save_memories=excluded.save_memories
+    """, (uid, timezone, dark_mode, notifications, save_memories))
+    conn.commit()
+    conn.close()
+
+# Call it during startup (where you call other ensure_* functions):
+ensure_preferences_schema()
+
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -792,6 +844,65 @@ def api_me(request: Request):
     return JSONResponse({"user": {"id": u["id"], "email": u["email"], "display_name": u["display_name"]}, "plan": plan})
 
 # ---------- Account / Preferences ----------
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse(url="/app?mode=login", status_code=302)
+
+    user = get_user(uid)
+    prefs = get_or_create_preferences(uid)
+
+    user_view = {
+        "id": user["id"],
+        "email": user["email"],
+        "display_name": user["display_name"],
+        "preferences": {
+            "timezone": prefs["timezone"],
+            "dark_mode": bool(prefs["dark_mode"]),
+            "notifications": bool(prefs["notifications"]),
+            "save_memories": bool(prefs["save_memories"]),
+        }
+    }
+    return templates.TemplateResponse("account.html", {"request": request, "user": user_view})
+@app.post("/account/update")
+async def account_update(request: Request, display_name: str = Form(...)):
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse(url="/app?mode=login", status_code=302)
+
+    display_name = (display_name or "").strip()
+    if not display_name:
+        return RedirectResponse(url="/account", status_code=302)
+
+    conn = db()
+    conn.execute("UPDATE users SET display_name=? WHERE id=?", (display_name, uid))
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(url="/account", status_code=302)
+
+@app.post("/account/preferences")
+async def account_preferences(
+    request: Request,
+    dark_mode: Optional[str] = Form(None),
+    notifications: Optional[str] = Form(None),
+    save_memories: Optional[str] = Form(None),
+    timezone: Optional[str] = Form("UTC"),
+):
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse(url="/app?mode=login", status_code=302)
+
+    # HTML checkboxes: present = "on", missing = None
+    dm = 1 if dark_mode else 0
+    nt = 1 if notifications else 0
+    sm = 1 if save_memories else 0
+    tz = (timezone or "UTC").strip() or "UTC"
+
+    update_preferences(uid, tz, dm, nt, sm)
+    return RedirectResponse(url="/account", status_code=302)
+
 @app.get("/api/preferences")
 def api_get_preferences(request: Request):
     uid = current_user_id(request)
@@ -1158,6 +1269,57 @@ def api_limits(request: Request):
         "allow_export_csv": cfg["allow_export_csv"],
         "coach_daily": cfg["coach_daily"], "coach_used": coach_used
     })
+import io, csv, zipfile
+
+@app.get("/account/download-data")
+def account_download_data(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse(url="/app?mode=login", status_code=302)
+
+    # Gather chats
+    conn = db()
+    chats = conn.execute("""
+        SELECT s.id AS session_id, m.role, m.content, m.ts
+        FROM messages m
+        JOIN sessions s ON s.id=m.session_id
+        WHERE s.user_id=?
+        ORDER BY m.ts ASC
+    """, (uid,)).fetchall()
+
+    # Gather coaching
+    coaching = conn.execute("""
+        SELECT id, topic, reflections, created_at
+        FROM coaching
+        WHERE user_id=?
+        ORDER BY created_at ASC
+    """, (uid,)).fetchall()
+    conn.close()
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # chats.csv
+        cbuf = io.StringIO()
+        cw = csv.writer(cbuf)
+        cw.writerow(["session_id", "role", "content", "time_utc"])
+        for r in chats:
+            cw.writerow([r["session_id"], r["role"], r["content"], datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"])
+        zf.writestr("chats.csv", cbuf.getvalue())
+
+        # coaching.csv
+        kbuf = io.StringIO()
+        kw = csv.writer(kbuf)
+        kw.writerow(["id", "topic", "reflections", "created_at"])
+        for r in coaching:
+            kw.writerow([r["id"], r["topic"], r["reflections"], r["created_at"]])
+        zf.writestr("coaching.csv", kbuf.getvalue())
+
+    mem.seek(0)
+    headers = {
+        "Content-Disposition": 'attachment; filename="kindcoach_data.zip"',
+        "Content-Type": "application/zip",
+    }
+    return PlainTextResponse(mem.read(), headers=headers)
 
 @app.get("/api/export")
 def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
@@ -1418,6 +1580,23 @@ def health():
     except Exception as e:
         return PlainTextResponse(str(e), status_code=500)
 
+@app.post("/account/clear-chats")
+async def account_clear_chats(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return RedirectResponse(url="/app?mode=login", status_code=302)
+
+    conn = db()
+    # Delete messages belonging to user's sessions
+    conn.execute("""
+        DELETE FROM messages
+        WHERE session_id IN (SELECT id FROM sessions WHERE user_id=?)
+    """, (uid,))
+    # Delete sessions
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/account", status_code=302)
 
 # ---------- Main ----------
 if __name__ == "__main__":
