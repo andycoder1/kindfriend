@@ -1,11 +1,25 @@
-# app.py (Chunk 1 of 5)
+# app.py — Kind Coach (all-in-one FastAPI app)
+
 import os
+import io
+import csv
+import sys
+import json
+import time
+import uuid
 import sqlite3
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
+from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
+from fastapi import FastAPI, Request, Query, Path
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+    RedirectResponse,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -21,6 +35,7 @@ try:
         return bcrypt.checkpw(p.encode(), h.encode())
 except Exception:
     import hashlib
+    print("⚠ bcrypt not available — using sha256 (dev only)", file=sys.stderr)
 
     def hash_password(p: str) -> str:
         return hashlib.sha256(p.encode()).hexdigest()
@@ -28,27 +43,106 @@ except Exception:
     def check_password(p: str, h: str) -> bool:
         return hashlib.sha256(p.encode()).hexdigest() == h
 
-
 # ---------- App setup ----------
-app = FastAPI(title="Personal Coach App")
+app = FastAPI(title="Kind Coach")
 
 SECRET_KEY = os.getenv("APP_SECRET_KEY", "dev-secret")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"]
 )
 
+# Static (optional)
 if not os.path.exists("static"):
     os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 DB_PATH = os.getenv("APP_DB_PATH", "app.db")
+APP_NAME = "Kind Coach"
+APP_TZ = os.getenv("APP_TZ", "Europe/London")
 
+# ---------- OpenAI ----------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL_FREE = os.getenv("OPENAI_MODEL_FREE", "gpt-4o-mini")
+OPENAI_MODEL_PLUS = os.getenv("OPENAI_MODEL_PLUS", "gpt-4o-mini")
+OPENAI_MODEL_PRO  = os.getenv("OPENAI_MODEL_PRO",  "gpt-4o")
+
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+        LLM_READY = True
+    except Exception as e:
+        print("OpenAI init error:", e, file=sys.stderr)
+        _client = None
+        LLM_READY = False
+else:
+    _client = None
+    LLM_READY = False
+    print("⚠ OPENAI_API_KEY not set", file=sys.stderr)
+
+# ---------- Stripe (optional) ----------
+PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
+STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_PLUS      = os.getenv("STRIPE_PRICE_PLUS")  # £4.99/mo
+STRIPE_PRICE_PRO       = os.getenv("STRIPE_PRICE_PRO")   # £7.99/mo
+
+PRICE_TO_PLAN: Dict[str, str] = {}
+def prices_loaded() -> bool:
+    return bool(STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO)
+
+try:
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+    STRIPE_READY = bool(STRIPE_SECRET_KEY)
+except Exception as e:
+    print("Stripe init error:", e, file=sys.stderr)
+    STRIPE_READY = False
+
+def map_price_to_plan(price_id: Optional[str]) -> Optional[str]:
+    if not price_id: return None
+    if not PRICE_TO_PLAN:
+        if STRIPE_PRICE_PLUS: PRICE_TO_PLAN[STRIPE_PRICE_PLUS] = "plus"
+        if STRIPE_PRICE_PRO:  PRICE_TO_PLAN[STRIPE_PRICE_PRO]  = "pro"
+    return PRICE_TO_PLAN.get(price_id)
+
+# ---------- Plans / feature flags ----------
+PLANS: Dict[str, Dict[str, Any]] = {
+    "free": {
+        "name": "Free", "price": "£0",
+        "chat_daily": 15, "mem_limit": 100, "allow_export_csv": False,
+        "context_notes": 12, "model": OPENAI_MODEL_FREE, "max_tokens": 350, "coach_daily": 1,
+    },
+    "plus": {
+        "name": "Plus", "price": "£4.99/mo",
+        "chat_daily": 200, "mem_limit": 1000, "allow_export_csv": True,
+        "context_notes": 18, "model": OPENAI_MODEL_PLUS, "max_tokens": 900, "coach_daily": 3,
+    },
+    "pro": {
+        "name": "Pro", "price": "£7.99/mo",
+        "chat_daily": 2000, "mem_limit": 10000, "allow_export_csv": True,
+        "context_notes": 28, "model": OPENAI_MODEL_PRO, "max_tokens": 2200, "coach_daily": 10,
+    },
+}
+
+# ---------- System prompts ----------
+SYSTEM_PROMPT = (
+    "You are Kind Coach, a person-centred, strengths-based personal coach. "
+    "You are not a therapist. If the user mentions self-harm or danger, suggest UK Samaritans (116 123), "
+    "NHS 111, or 999 in an emergency. Reflect the user's language; ask short, powerful questions; "
+    "offer 1–2 practical next steps; and keep answers concise."
+)
+COACHING_STYLE = (
+    "Coaching style: solution-focused, values-led, growth mindset, SMART goals. "
+    "Prefer questions to advice. Keep replies under ~200 words unless asked."
+)
+
+# ---------- DB helpers ----------
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -65,7 +159,6 @@ def init_db():
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             display_name TEXT,
-            tier TEXT DEFAULT 'free',
             created_at TEXT NOT NULL,
             stripe_customer_id TEXT
         )
@@ -78,11 +171,13 @@ def init_db():
             timezone TEXT DEFAULT 'UTC',
             dark_mode INTEGER DEFAULT 0,
             notifications INTEGER DEFAULT 1,
+            retain_memories INTEGER DEFAULT 1,
+            chat_retention_days INTEGER DEFAULT 90,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
 
-    # user memories (for coaching/journaling)
+    # user memories
     cur.execute("""
         CREATE TABLE IF NOT EXISTS user_memories (
             id TEXT PRIMARY KEY,
@@ -100,6 +195,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             title TEXT,
             created_at REAL NOT NULL,
+            saved INTEGER DEFAULT 0,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
@@ -108,14 +204,14 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             session_id TEXT NOT NULL,
-            role TEXT NOT NULL,     -- 'user' | 'assistant'
+            role TEXT NOT NULL,
             content TEXT NOT NULL,
             ts REAL NOT NULL,
             FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
     """)
 
-    # coaching sessions
+    # coaching notes
     cur.execute("""
         CREATE TABLE IF NOT EXISTS coaching (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,144 +223,7 @@ def init_db():
         )
     """)
 
-    # optional indices for performance
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id)")
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
-# app.py (Chunk 2 of 5) — Config, Plans, OpenAI/Stripe, helpers
-import sys, io, csv, json, time, uuid
-from typing import Dict, Any, Tuple, List
-from zoneinfo import ZoneInfo
-from fastapi import Query, Path
-from fastapi.responses import JSONResponse
-
-# ===== Environment =====
-APP_NAME = "Kind Coach"
-APP_TZ = os.getenv("APP_TZ", "Europe/London")
-
-# OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL_FREE = os.getenv("OPENAI_MODEL_FREE", "gpt-4o-mini")
-OPENAI_MODEL_PLUS = os.getenv("OPENAI_MODEL_PLUS", "gpt-4o-mini")
-OPENAI_MODEL_PRO  = os.getenv("OPENAI_MODEL_PRO",  "gpt-4o")
-
-# Stripe
-PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
-STRIPE_SECRET_KEY      = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
-STRIPE_WEBHOOK_SECRET  = os.getenv("STRIPE_WEBHOOK_SECRET")
-STRIPE_PRICE_PLUS      = os.getenv("STRIPE_PRICE_PLUS")  # £4.99 monthly
-STRIPE_PRICE_PRO       = os.getenv("STRIPE_PRICE_PRO")   # £7.99 monthly
-
-# ===== Plans / feature flags =====
-PLANS: Dict[str, Dict[str, Any]] = {
-    "free": {
-        "name": "Free",
-        "price": "£0",
-        "chat_daily": 15,
-        "mem_limit": 100,
-        "allow_export_csv": False,
-        "context_notes": 10,
-        "model": OPENAI_MODEL_FREE,
-        "max_tokens": 350,
-        "coach_daily": 1,     # guided coaching starts/day
-    },
-    "plus": {
-        "name": "Plus",
-        "price": "£4.99/mo",
-        "chat_daily": 200,
-        "mem_limit": 1000,
-        "allow_export_csv": True,
-        "context_notes": 18,
-        "model": OPENAI_MODEL_PLUS,
-        "max_tokens": 900,
-        "coach_daily": 3,
-    },
-    "pro": {
-        "name": "Pro",
-        "price": "£7.99/mo",
-        "chat_daily": 2000,
-        "mem_limit": 10000,
-        "allow_export_csv": True,
-        "context_notes": 28,
-        "model": OPENAI_MODEL_PRO,
-        "max_tokens": 2200,
-        "coach_daily": 10,
-    },
-}
-
-# ===== System prompts =====
-SYSTEM_PROMPT = (
-    "You are Kind Coach, a person-centred, strengths-based personal coach. "
-    "You are not a therapist. If the user mentions self-harm or danger, suggest UK Samaritans (116 123), "
-    "NHS 111, or 999 in an emergency. Reflect the user's language, ask short, powerful questions, "
-    "offer 1-2 practical next steps, and keep answers concise."
-)
-COACHING_STYLE = (
-    "Coaching style: solution-focused, values-led, growth mindset, SMART goals. "
-    "Prefer questions to advice. Keep replies under ~200 words unless asked."
-)
-
-# ===== OpenAI client =====
-if OPENAI_API_KEY:
-    try:
-        from openai import OpenAI
-        _client = OpenAI(api_key=OPENAI_API_KEY)
-        LLM_READY = True
-    except Exception as e:
-        print("OpenAI init error:", e, file=sys.stderr)
-        _client = None
-        LLM_READY = False
-else:
-    _client = None
-    LLM_READY = False
-    print("⚠ OPENAI_API_KEY not set.", file=sys.stderr)
-
-# ===== Stripe client =====
-PRICE_TO_PLAN: Dict[str, str] = {}
-try:
-    import stripe
-    stripe.api_key = STRIPE_SECRET_KEY
-    STRIPE_READY = bool(STRIPE_SECRET_KEY)
-except Exception as e:
-    print("Stripe init error:", e, file=sys.stderr)
-    STRIPE_READY = False
-
-def prices_loaded() -> bool:
-    return bool(STRIPE_PRICE_PLUS and STRIPE_PRICE_PRO)
-
-def map_price_to_plan(price_id: str) -> Optional[str]:
-    if not PRICE_TO_PLAN:
-        if STRIPE_PRICE_PLUS: PRICE_TO_PLAN[STRIPE_PRICE_PLUS] = "plus"
-        if STRIPE_PRICE_PRO:  PRICE_TO_PLAN[STRIPE_PRICE_PRO]  = "pro"
-    return PRICE_TO_PLAN.get(price_id)
-
-# ===== Session helpers (server sessions) =====
-def current_user_id(request: Request) -> Optional[int]:
-    return request.session.get("user_id")
-
-def get_user(uid: Optional[int]) -> Optional[sqlite3.Row]:
-    if not uid: return None
-    conn = db()
-    r = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
-    conn.close()
-    return r
-
-# ===== DB migrations for billing =====
-def ensure_billing_tables():
-    conn = db()
-    cur = conn.cursor()
-    # add stripe_customer_id if missing
-    cols = [c[1] for c in cur.execute("PRAGMA table_info(users)")]
-    if "stripe_customer_id" not in cols:
-        cur.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
-    # subscriptions table
+    # subscriptions
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             user_id INTEGER PRIMARY KEY,
@@ -276,22 +235,20 @@ def ensure_billing_tables():
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """)
-    conn.commit(); conn.close()
 
-ensure_billing_tables()
-# --- Preferences columns migration (retain_memories, chat_retention_days) ---
-def ensure_preferences_columns():
-    conn = db()
-    cur = conn.cursor()
-    cols = [c[1] for c in cur.execute("PRAGMA table_info(preferences)")]
-    if "retain_memories" not in cols:
-        cur.execute("ALTER TABLE preferences ADD COLUMN retain_memories INTEGER DEFAULT 1")
-    if "chat_retention_days" not in cols:
-        cur.execute("ALTER TABLE preferences ADD COLUMN chat_retention_days INTEGER DEFAULT 90")
+    # indices
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id)")
+
     conn.commit()
     conn.close()
 
-ensure_preferences_columns()
+init_db()
+
+# ---------- Feature helpers ----------
+def current_user_id(request: Request) -> Optional[int]:
+    return request.session.get("user_id")
 
 def ensure_subscription_row(uid: int):
     conn = db()
@@ -316,7 +273,8 @@ def set_plan(uid: int, plan: str, sub_id: Optional[str] = None, status: Optional
           status=excluded.status,
           current_period_end=excluded.current_period_end
     """, (uid, plan, sub_id, status, cpe, datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_subscription(uid: Optional[int]) -> str:
     if not uid: return "free"
@@ -333,7 +291,6 @@ def plan_cfg(uid: Optional[int]) -> Tuple[str, Dict[str, Any]]:
     p = get_subscription(uid)
     return p, PLANS[p]
 
-# ===== Feature helpers =====
 def memories_count(uid: Optional[int]) -> int:
     if not uid: return 0
     conn = db()
@@ -376,7 +333,7 @@ def get_user_memories_text(uid: Optional[int], limit: int) -> Optional[str]:
     if not uid: return None
     conn = db()
     rows = conn.execute(
-        "SELECT note, created_at FROM user_memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+        "SELECT note FROM user_memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
         (uid, limit)
     ).fetchall()
     conn.close()
@@ -398,20 +355,7 @@ def current_time_note():
     now_local = datetime.now(ZoneInfo(APP_TZ))
     return f"Today is {now_local.strftime('%A %d %B %Y')} and the local time is {now_local.strftime('%H:%M')} in {APP_TZ}."
 
-def llm_chat(model: str, max_tokens: int, messages: List[Dict[str, str]]) -> str:
-    if not LLM_READY or _client is None:
-        return "LLM is not configured. Set OPENAI_API_KEY."
-    try:
-        resp = _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        return f"(LLM error: {e})"
-# app.py (Chunk 3 of 5) — UI pages, Auth, Preferences, Memories
+# ---------- UI (Landing + App) ----------
 LANDING_HTML = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Kind Coach — Person-Centred Coaching</title>
@@ -426,6 +370,7 @@ header h1{margin:0;font-size:2.1rem}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:1100px;margin:1rem auto 2rem;padding:0 16px}
 .card{background:#fff;border:1px solid #d1d7db;border-radius:16px;padding:16px;box-shadow:0 6px 20px rgba(0,0,0,.06)}
 @media(max-width:900px){.grid{grid-template-columns:1fr}}
+.small{color:#54656f}
 </style></head><body>
 <header><h1>Kind Coach</h1><p>Friendly AI coaching with a person-centred touch</p></header>
 <div class="hero"><img src="/static/coffee_chat.jpg" alt="Coaching conversation"></div>
@@ -439,10 +384,10 @@ header h1{margin:0;font-size:2.1rem}
   <button class="btn alt" onclick="location.href='/pricing'">Pricing</button>
   <button class="btn alt" onclick="location.href='/app'">Open app</button>
 </p>
+<p class="small">50% of proceeds donated to Samaritans.</p>
 </body></html>
 """
 
-# Main app (keeps your WhatsApp-y look, adds Coaching button)
 APP_HTML = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Kind Coach</title><link rel="icon" href="/static/favicon.ico">
@@ -476,6 +421,7 @@ body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Robo
 .composer{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px;border-top:1px solid var(--br);background:var(--panel)}
 .input{padding:12px 14px;border-radius:999px;border:1px solid var(--br);background:#fff;color:var(--txt)}
 .send{background:var(--g);color:#fff;border:none;padding:10px 16px;border-radius:999px;cursor:pointer}
+.badge{background:#fff;color:#073;border:1px solid #d1d7db;border-radius:999px;padding:4px 10px;font-size:12px}
 .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:40}
 .modal{display:none;position:fixed;inset:0;z-index:50;place-items:center}
 .modal.on,.modal-backdrop.on{display:grid}
@@ -486,7 +432,6 @@ body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Robo
 .form-row{display:grid;gap:6px;margin:10px 0}
 .form-row input{padding:10px 12px;border-radius:12px;border:1px solid var(--br);background:#fff;color:var(--txt)}
 .form-actions{display:flex;gap:8px;justify-content:flex-end}
-.badge{background:#fff;color:#073;border:1px solid #d1d7db;border-radius:999px;padding:4px 10px;font-size:12px}
 </style></head><body>
   <div class="topbar">
     <div class="logo">KC</div>
@@ -496,8 +441,9 @@ body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Robo
     <span class="chip" id="me">Not signed in</span>
     <button id="download-txt" class="tb-btn">.txt</button>
     <button id="download-csv" class="tb-btn">.csv</button>
+    <button id="download-json" class="tb-btn">.json</button>
     <button id="open-pricing" class="tb-btn">Pricing</button>
-    <button id="open-settings" class="tb-btn">Settings</button>
+    <button id="open-settings" class="tb-btn">Account</button>
   </div>
 
   <div class="app">
@@ -549,13 +495,17 @@ body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Robo
     </div>
   </div>
 
-  <!-- Settings Modal -->
+  <!-- Account / Preferences Modal -->
   <div class="modal-backdrop" id="settings-backdrop"></div>
   <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-card">
       <div class="modal-header"><div class="modal-title" id="settings-title">Account & Preferences</div><button class="xbtn" id="settings-close">Close</button></div>
       <div class="form-row"><label>Display name</label><input id="display-name" placeholder="e.g., Alex"/></div>
-      <div class="form-actions" style="justify-content:flex-start;margin-bottom:12px;"><button class="tb-btn primary" id="save-display-name">Save name</button></div>
+      <div class="form-row"><label>Timezone</label><input id="pref-timezone" placeholder="e.g., Europe/London"/></div>
+      <div class="form-row"><label>Retain memories</label><input id="pref-retain" type="checkbox"/></div>
+      <div class="form-row"><label>Chat retention (days)</label><input id="pref-retention" type="number" value="90" min="1"/></div>
+      <div class="form-actions" style="justify-content:flex-start;margin-bottom:12px;"><button class="tb-btn primary" id="save-prefs">Save</button></div>
+
       <hr style="border:none;border-top:1px solid #d1d7db;margin:8px 0 12px;">
       <div class="form-row"><label>Add a memory</label><input id="new-memory" placeholder="e.g., I prefer short replies"/></div>
       <div class="form-actions" style="justify-content:flex-start"><button class="tb-btn primary" id="add-memory">Add memory</button></div>
@@ -565,194 +515,64 @@ body{color:var(--txt);font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Robo
 
 <script>
 const chat=document.getElementById('chat'); const input=document.getElementById('message'); const send=document.getElementById('send');
-const sessionsEl=document.getElementById('sessions'); const meSpan=document.getElementById('me'); const planChip=document.getElementById('plan-chip');
-const limits=document.getElementById('limits');
-
-function md(x){const esc=x.replace(/[&<>]/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); const withLinks=esc.replace(/(https?:\/\/\\S+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>'); return withLinks.replace(/\\n/g,'<br/>');}
+const sessionsEl=document.getElementById('sessions'); const meSpan=document.getElementById('me'); const planChip=document.getElementById('plan-chip'); const limits=document.getElementById('limits');
+function md(x){const esc=x.replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch])); const withLinks=esc.replace(/(https?:\/\/\\S+)/g,'<a href="$1" target="_blank" rel="noopener">$1</a>'); return withLinks.replace(/\\n/g,'<br/>');}
 function addBubble(text, who){const row=document.createElement('div'); row.className='row '+who; const av=document.createElement('div'); av.className='avatar'; av.textContent=(who==='bot'?'KC':'You'); const b=document.createElement('div'); b.className='bubble'; b.innerHTML=md(text); const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); if(who==='bot'){row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap);} else {const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); row.style.gridTemplateColumns='1fr auto';} chat.appendChild(row); chat.scrollTop=chat.scrollHeight;}
 function makeBotBubble(initial='…'){const row=document.createElement('div'); row.className='row bot'; const av=document.createElement('div'); av.className='avatar'; av.textContent='KC'; const b=document.createElement('div'); b.className='bubble'; b.textContent=initial; const meta=document.createElement('div'); meta.className='meta'; meta.textContent=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); row.appendChild(av); const wrap=document.createElement('div'); wrap.appendChild(b); wrap.appendChild(meta); row.appendChild(wrap); chat.appendChild(row); chat.scrollTop=chat.scrollHeight; return b;}
 
-async function refreshMe(){const r=await fetch('/api/me'); const d=await r.json(); if(d.user){ input.disabled=false; send.disabled=false; input.placeholder="Type a message"; meSpan.textContent = d.user.display_name || d.user.email; } else { input.disabled=true; send.disabled=true; input.placeholder="Sign in to start"; meSpan.textContent="Not signed in"; }}
+async function refreshMe(){const r=await fetch('/api/me'); const d=await r.json(); if(d.user){ input.disabled=false; send.disabled=false; input.placeholder="Type a message"; meSpan.textContent=d.user.display_name||d.user.email; } else { input.disabled=true; send.disabled=true; input.placeholder="Sign in to start"; meSpan.textContent="Not signed in"; }}
 async function refreshLimits(){const r=await fetch('/api/limits'); const d=await r.json(); planChip.textContent=`${d.plan_name}`; limits.textContent=`Chat ${d.used_today}/${d.chat_daily} • Coach ${d.coach_used}/${d.coach_daily}`; document.getElementById('download-csv').disabled=!d.allow_export_csv;}
 
 document.getElementById('open-pricing').onclick=()=>location.href='/pricing';
 document.getElementById('download-txt').onclick=()=>{location.href='/api/export?fmt=txt';};
 document.getElementById('download-csv').onclick=()=>{location.href='/api/export?fmt=csv';};
+document.getElementById('download-json').onclick=()=>{location.href='/api/chat/export';};
 
-async function loadSessions(){const r=await fetch('/api/sessions'); const data=await r.json(); sessionsEl.innerHTML=''; (data.sessions||[]).forEach(s=>{ const el=document.createElement('div'); el.className='item'+(data.active===s.id?' active':''); el.textContent=s.title||'Untitled'; el.onclick=async()=>{ await fetch('/api/session/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:s.id})}); await loadHistory(); await loadSessions(); }; sessionsEl.appendChild(el); });}
+async function loadSessions(){const r=await fetch('/api/sessions'); const data=await r.json(); sessionsEl.innerHTML=''; (data.sessions||[]).forEach(s=>{ const el=document.createElement('div'); el.className='item'+(data.active===s.id?' active':''); el.textContent=s.title||'Untitled'; el.onclick=async()=>{ await fetch('/api/session/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:s.id})}); await loadHistory(); await loadSessions(); }; const del=document.createElement('button'); del.className='xbtn'; del.textContent='Delete'; del.style.marginLeft='8px'; del.onclick=async(e)=>{e.stopPropagation(); if(!confirm('Delete this chat?'))return; await fetch('/api/sessions/'+s.id,{method:'DELETE'}); await loadSessions(); await loadHistory();}; el.appendChild(del); sessionsEl.appendChild(el); });}
 async function loadHistory(){const r=await fetch('/api/history'); const data=await r.json(); chat.innerHTML=''; (data.messages||[]).forEach(m=>addBubble(m.content, m.role==='assistant'?'bot':'user'));}
-async function sendMessage(){
-  const msg = input.value.trim(); if(!msg) return;
-  input.value=''; addBubble(msg,'user');
 
-  const res = await fetch('/api/chat/stream', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({message: msg})
-  });
+async function sendMessage(){const msg=input.value.trim(); if(!msg) return; input.value=''; addBubble(msg,'user'); const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})}); if(res.status===401){ openAuth('login'); return; } if(!res.ok){ addBubble('Error: '+(await res.text()),'bot'); return; } const reader=res.body.getReader(); const decoder=new TextDecoder(); let buf='', acc=''; const bubbleEl=makeBotBubble('…'); while(true){ const {value,done}=await reader.read(); if(done) break; buf+=decoder.decode(value,{stream:true}); const parts=buf.split("\\n\\n"); buf=parts.pop()||''; for(const part of parts){ if(!part.startsWith('data:')) continue; const raw=part.slice(5).trim(); if(raw==='[DONE]') continue; const chunk=raw.replace(/\\n/g,'\\n'); acc+=chunk; bubbleEl.innerHTML=md(acc); chat.scrollTop=chat.scrollHeight; }} await refreshLimits(); }
+send.onclick=sendMessage; input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); sendMessage(); } });
 
-  if(res.status===401){ openAuth('login'); return; }
-  if(!res.ok){ addBubble('Error: '+(await res.text()),'bot'); return; }
+document.getElementById('new-chat').onclick=async()=>{ const title=prompt('Name your chat (optional):','New chat')||'New chat'; const r=await fetch('/api/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})}); if(r.ok){ await loadSessions(); await loadHistory(); }};
+document.getElementById('coach-daily').onclick=async()=>{ const r=await fetch('/api/coaching/daily'); const d=await r.json(); addBubble('Daily reflection:\\n\\n'+d.prompt,'bot'); };
+document.getElementById('coach-start').onclick=async()=>{ const topic=prompt('What would you like coaching on today?'); if(!topic) return; const r=await fetch('/api/coaching/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic})}); const d=await r.json(); addBubble(d.opening,'bot'); };
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '', acc = '';
-  const bubbleEl = makeBotBubble('…');
+const authModal=document.getElementById('auth-modal'); const authBackdrop=document.getElementById('auth-backdrop'); const authClose=document.getElementById('auth-close');
+const tabLogin=document.getElementById('tab-login'); const tabSignup=document.getElementById('tab-signup'); const paneLogin=document.getElementById('pane-login'); const paneSignup=document.getElementById('pane-signup');
+function showLogin(){paneLogin.style.display=''; paneSignup.style.display='none'; tabLogin.classList.add('primary'); tabSignup.classList.remove('primary');}
+function showSignup(){paneLogin.style.display='none'; paneSignup.style.display=''; tabSignup.classList.add('primary'); tabLogin.classList.remove('primary');}
+function openAuth(which='login'){authModal.classList.add('on'); authBackdrop.classList.add('on'); (which==='signup'?showSignup():showLogin());}
+function closeAuth(){authModal.classList.remove('on'); authBackdrop.classList.remove('on');}
+document.getElementById('open-auth').onclick=()=>openAuth('login'); authClose.onclick=closeAuth; authBackdrop.onclick=closeAuth;
+document.getElementById('login-cancel').onclick=closeAuth; document.getElementById('signup-cancel').onclick=closeAuth;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-
-    const parts = buf.split("\n\n");          // FIX: real newline splitter
-    buf = parts.pop() || '';
-
-    for (const part of parts) {
-      if (!part.startsWith('data:')) continue;
-      const raw = part.slice(5);              // FIX: don't trim away spaces
-      if (raw.trim() === '[DONE]') continue;
-      const chunk = raw.replace(/\\n/g, '\n'); // FIX: turn "\n" into real newlines
-      acc += chunk;
-      bubbleEl.innerHTML = md(acc);
-      chat.scrollTop = chat.scrollHeight;
-    }
-  }
-
-  await refreshLimits();
-}
-
+const le=document.getElementById('login-email'); const lp=document.getElementById('login-password');
+const se=document.getElementById('signup-email'); const sp=document.getElementById('signup-password');
 
 document.getElementById('login-submit').onclick=async()=>{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:le.value,password:lp.value})}); const d=await r.json(); if(!r.ok){alert(d.error||'Login failed'); return;} closeAuth(); addBubble('Signed in.','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory();};
 document.getElementById('signup-submit').onclick=async()=>{const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:se.value,password:sp.value})}); const d=await r.json(); if(!r.ok){alert(d.error||'Signup failed'); return;} closeAuth(); addBubble('Account created. 👋','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory();};
 document.getElementById('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST'}); addBubble('Signed out.','bot'); await refreshMe(); await refreshLimits(); await loadSessions(); chat.innerHTML='';};
 
 const settingsModal=document.getElementById('settings-modal'); const settingsBackdrop=document.getElementById('settings-backdrop'); const settingsClose=document.getElementById('settings-close'); const openSettingsBtn=document.getElementById('open-settings');
-const displayNameInput=document.getElementById('display-name'); const saveDisplayNameBtn=document.getElementById('save-display-name');
-const newMemoryInput=document.getElementById('new-memory'); const addMemoryBtn=document.getElementById('add-memory'); const memoriesList=document.getElementById('memories-list');
+const displayNameInput=document.getElementById('display-name'); const tzInput=document.getElementById('pref-timezone'); const retainInput=document.getElementById('pref-retain'); const retentionInput=document.getElementById('pref-retention');
+const savePrefsBtn=document.getElementById('save-prefs'); const newMemoryInput=document.getElementById('new-memory'); const addMemoryBtn=document.getElementById('add-memory'); const memoriesList=document.getElementById('memories-list');
 
-function openSettings(){settingsModal.classList.add('on'); settingsBackdrop.classList.add('on'); fetch('/api/me').then(r=>r.json()).then(d=>{ if(d.user){ displayNameInput.value=d.user.display_name||''; } }); loadMemories();}
+function openSettings(){settingsModal.classList.add('on'); settingsBackdrop.classList.add('on'); fetch('/api/me').then(r=>r.json()).then(d=>{ if(d.user){ displayNameInput.value=d.user.display_name||''; } }); fetch('/api/preferences').then(r=>r.json()).then(p=>{ if(p && !p.error){ tzInput.value=p.timezone||''; retainInput.checked=!!p.retain_memories; retentionInput.value=p.chat_retention_days||90; }}); loadMemories();}
 function closeSettings(){settingsModal.classList.remove('on'); settingsBackdrop.classList.remove('on');}
 openSettingsBtn.onclick=openSettings; settingsClose.onclick=closeSettings; settingsBackdrop.onclick=closeSettings;
 
+savePrefsBtn.onclick=async()=>{const body={ display_name:displayNameInput.value.trim(), timezone:tzInput.value.trim(), retain_memories:retainInput.checked, chat_retention_days:parseInt(retentionInput.value||'90',10)}; const r=await fetch('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok){alert('Failed to save');return;} alert('Saved!'); await refreshMe();};
+
 async function loadMemories(){memoriesList.innerHTML='Loading...'; const r=await fetch('/api/memories'); if(r.status===401){memoriesList.innerHTML='Sign in to manage memories.'; return;} const d=await r.json(); memoriesList.innerHTML=''; (d.memories||[]).forEach(m=>{ const row=document.createElement('div'); row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center'; const span=document.createElement('span'); span.textContent=m.note; const del=document.createElement('button'); del.className='xbtn'; del.textContent='Delete'; del.onclick=async()=>{ if(!confirm('Delete this memory?')) return; const rr=await fetch('/api/memories/'+m.id,{method:'DELETE'}); const dd=await rr.json(); if(dd.ok){ loadMemories(); } }; row.appendChild(span); row.appendChild(del); memoriesList.appendChild(row); }); if(!memoriesList.innerHTML){ memoriesList.textContent='No memories yet.'; }}
-saveDisplayNameBtn.onclick=async()=>{const name=displayNameInput.value.trim(); if(!name) return alert('Enter a name'); const r=await fetch('/api/user/display_name',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:name})}); if(!r.ok){alert('Failed to save'); return;} alert('Saved!'); await refreshMe();};
 addMemoryBtn.onclick=async()=>{const note=newMemoryInput.value.trim(); if(!note) return; const r=await fetch('/api/memories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note})}); const d=await r.json(); if(!r.ok){alert(d.error||'Failed to add'); return;} newMemoryInput.value=''; loadMemories(); refreshLimits();};
 
 document.addEventListener('DOMContentLoaded', async ()=>{ await refreshMe(); await refreshLimits(); await loadSessions(); await loadHistory(); const params=new URLSearchParams(location.search); const mode=params.get('mode'); if(mode==='signup'||mode==='login'){openAuth(mode);} });
 </script>
 </body></html>
 """
-ACCOUNT_HTML = r"""<!doctype html><html lang="en"><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Account — Kind Coach</title><link rel="icon" href="/static/favicon.ico">
-<style>
-:root{--g:#128C7E;--gd:#075E54;--acc:#25D366;--txt:#111b21;--mut:#54656f;--bg:#f0f2f5;--br:#d1d7db;--panel:#ffffff}
-*{box-sizing:border-box} html,body{height:100%;margin:0}
-body{font:15px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--txt)}
-.topbar{height:60px;display:flex;align-items:center;gap:12px;padding:0 16px;background:linear-gradient(0deg,var(--gd),var(--g));color:#fff}
-.logo{width:36px;height:36px;border-radius:10px;background:#25D366;display:grid;place-items:center;color:#073;font-weight:800}
-.brand{font-weight:800}.grow{flex:1 1 auto}
-.tb-btn{background:#fff;color:#073;border:1px solid rgba(0,0,0,.1);padding:8px 10px;border-radius:999px;cursor:pointer}
-.wrap{max-width:1000px;margin:18px auto;padding:0 16px;display:grid;gap:14px}
-.card{background:#fff;border:1px solid var(--br);border-radius:16px;padding:14px}
-.row{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center}
-h3{margin:.2rem 0 .6rem}
-.small{color:var(--mut);font-size:13px}
-ul{list-style:none;padding-left:0}
-li{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px dashed #e6ebef}
-li:last-child{border-bottom:none}
-input[type=number]{width:120px}
-</style></head><body>
-<div class="topbar"><div class="logo">KC</div><div class="brand">Account</div><div class="grow"></div>
-<button class="tb-btn" onclick="location.href='/app'">Back to App</button></div>
-<div class="wrap">
-  <div class="card">
-    <h3>Profile</h3>
-    <div class="row"><label>Display name</label><input id="display-name" placeholder="e.g., Alex"></div>
-    <div class="row"><label>Timezone</label><input id="timezone" placeholder="e.g., Europe/London"></div>
-    <div class="row"><label>Dark mode</label><input id="dark" type="checkbox"></div>
-    <div class="row"><label>Notifications</label><input id="notif" type="checkbox"></div>
-    <div class="row"><label>Retain memories</label><input id="retain" type="checkbox"></div>
-    <div class="row"><label>Chat retention (days)</label><input id="retain_days" type="number" min="0" step="1"></div>
-    <div><button id="save-profile" class="tb-btn">Save changes</button> <span id="msg" class="small"></span></div>
-  </div>
 
-  <div class="card">
-    <h3>Memories</h3>
-    <div style="display:flex;gap:8px;align-items:center">
-      <input id="new-mem" placeholder="Add a memory to keep" style="flex:1">
-      <button id="add-mem" class="tb-btn">Add</button>
-    </div>
-    <ul id="mem-list" class="small" style="margin-top:8px"></ul>
-  </div>
-
-  <div class="card">
-    <h3>Chats</h3>
-    <ul id="chat-list" class="small"></ul>
-  </div>
-</div>
-<script>
-async function load(){
-  const me = await (await fetch('/api/me')).json();
-  if(!me.user){ location.href='/app?mode=login'; return; }
-  document.getElementById('display-name').value = me.user.display_name || '';
-  const prefs = await (await fetch('/api/preferences')).json();
-  document.getElementById('timezone').value = (prefs.timezone||'') || 'Europe/London';
-  document.getElementById('dark').checked = !!prefs.dark_mode;
-  document.getElementById('notif').checked = !!prefs.notifications;
-  document.getElementById('retain').checked = !!prefs.retain_memories;
-  document.getElementById('retain_days').value = prefs.chat_retention_days ?? 90;
-
-  // memories
-  const mem = await (await fetch('/api/memories')).json();
-  const ul = document.getElementById('mem-list'); ul.innerHTML='';
-  (mem.memories||[]).forEach(m=>{
-    const li=document.createElement('li');
-    li.innerHTML = '<span>'+m.note+'</span>';
-    const b=document.createElement('button'); b.textContent='Delete'; b.className='tb-btn';
-    b.onclick = async()=>{ await fetch('/api/memories/'+m.id,{method:'DELETE'}); load(); };
-    li.appendChild(b); ul.appendChild(li);
-  });
-
-  // chats
-  const s = await (await fetch('/api/sessions')).json();
-  const cl = document.getElementById('chat-list'); cl.innerHTML='';
-  (s.sessions||[]).forEach(ch=>{
-    const li=document.createElement('li');
-    li.innerHTML='<span>'+ch.title+'</span>';
-    const wrap=document.createElement('div');
-    const exp=document.createElement('a'); exp.textContent='.txt'; exp.href='/api/export?fmt=txt&session_id='+ch.id; exp.className='tb-btn';
-    const del=document.createElement('button'); del.textContent='Delete'; del.className='tb-btn';
-    del.onclick = async()=>{ if(!confirm('Delete this chat?')) return; await fetch('/api/sessions/'+ch.id,{method:'DELETE'}); load(); };
-    wrap.appendChild(exp); wrap.appendChild(del); li.appendChild(wrap);
-    cl.appendChild(li);
-  });
-}
-
-document.getElementById('save-profile').onclick = async ()=>{
-  const body = {
-    display_name: document.getElementById('display-name').value,
-    timezone: document.getElementById('timezone').value,
-    dark_mode: document.getElementById('dark').checked ? 1 : 0,
-    notifications: document.getElementById('notif').checked ? 1 : 0,
-    retain_memories: document.getElementById('retain').checked ? 1 : 0,
-    chat_retention_days: parseInt(document.getElementById('retain_days').value||'90',10)
-  };
-  const r = await fetch('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  document.getElementById('msg').textContent = r.ok ? 'Saved.' : 'Failed.';
-  if(r.ok){ await load(); }
-};
-
-document.getElementById('add-mem').onclick = async ()=>{
-  const v = document.getElementById('new-mem').value.trim(); if(!v) return;
-  await fetch('/api/memories',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:v})});
-  document.getElementById('new-mem').value=''; load();
-};
-
-load();
-</script>
-</body></html>"""
-
+# ---------- Pricing (HTML wrapper) ----------
 PRICING_TOP = r"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Pricing — Kind Coach</title><link rel="icon" href="/static/favicon.ico">
@@ -800,7 +620,7 @@ def pricing_card_html(plan_key: str, current: str, signed_in: bool) -> str:
             cta = f"<form method='post' action='/billing/checkout'><input type='hidden' name='plan' value='{plan_key}'/><button class='tb-btn'>Subscribe to {p['name']}</button></form>"
     return f"<div class='card'><h3>{p['name']}</h3><div class='price'>{p['price']}</div><ul class='small' style='list-style:none;padding-left:0'>{ul}</ul>{cta}</div>"
 
-# -------- Routes: pages --------
+# ---------- Routes: pages ----------
 @app.get("/", response_class=HTMLResponse)
 def landing():
     return HTMLResponse(LANDING_HTML)
@@ -809,48 +629,7 @@ def landing():
 def app_page():
     return HTMLResponse(APP_HTML)
 
-@app.get("/account", response_class=HTMLResponse)
-def account_page():
-    return HTMLResponse(ACCOUNT_HTML)
-# -------- Preferences API (profile + memory policy) --------
-@app.get("/api/preferences")
-def api_get_preferences(request: Request):
-    uid = current_user_id(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    conn = db()
-    # ensure row exists
-    conn.execute("INSERT OR IGNORE INTO preferences (user_id) VALUES (?)", (uid,))
-    row = conn.execute("""
-        SELECT timezone,
-               dark_mode,
-               notifications,
-               COALESCE(retain_memories, 1)      AS retain_memories,
-               COALESCE(chat_retention_days, 90) AS chat_retention_days
-        FROM preferences WHERE user_id=?
-    """, (uid,)).fetchone()
-    conn.close()
-    return JSONResponse({
-        "timezone": row["timezone"],
-        "dark_mode": row["dark_mode"],
-        "notifications": row["notifications"],
-        "retain_memories": row["retain_memories"],
-        "chat_retention_days": row["chat_retention_days"],
-    })
-
-@app.post("/api/preferences")
-async def api_update_preferences(request: Request):
-    uid = current_user_id(request)
-    if not uid:
-        return JSONResponse({"error":"Unauthorized"}, status_code=401)
-    d = await request.json()
-    tz  = (d.get("timezone") or "").strip() or None
-    dm  = 1 if d.get("dark_mode") else 0
-    nt  = 1 if d.get("notifications") else 0
-    rm  = 1 if d.get("retain_memories") else 0
-    crt = i
-
-# -------- Auth APIs (session-based) --------
+# ---------- Auth ----------
 @app.post("/api/register")
 async def api_register(request: Request):
     d = await request.json()
@@ -858,7 +637,6 @@ async def api_register(request: Request):
     password = d.get("password") or ""
     if not email or not password:
         return JSONResponse({"error": "Email and password required"}, status_code=400)
-    # create
     try:
         conn = db()
         cur = conn.cursor()
@@ -873,10 +651,11 @@ async def api_register(request: Request):
         conn.close()
     request.session["user_id"] = uid
     ensure_subscription_row(uid)
-    # create first chat session
-    _sid = str(uuid.uuid4())
-    conn = db(); conn.execute("INSERT INTO sessions (id, user_id, title, created_at) VALUES (?,?,?,?)",
-                              (_sid, uid, "Welcome", time.time())); conn.commit(); conn.close()
+    # seed first chat session
+    sid = str(uuid.uuid4())
+    conn = db(); conn.execute("INSERT INTO sessions (id,user_id,title,created_at) VALUES (?,?,?,?)",
+                              (sid, uid, "Welcome", time.time())); conn.commit(); conn.close()
+    request.session["active_session"] = sid
     return JSONResponse({"ok": True})
 
 @app.post("/api/login")
@@ -891,28 +670,19 @@ async def api_login(request: Request):
         return JSONResponse({"error": "Invalid credentials"}, status_code=401)
     request.session["user_id"] = r["id"]
     ensure_subscription_row(r["id"])
+    # pick latest session or create one
+    conn = db()
+    s = conn.execute("SELECT id FROM sessions WHERE user_id=? ORDER BY created_at DESC LIMIT 1", (r["id"],)).fetchone()
+    if not s:
+        sid = str(uuid.uuid4())
+        conn.execute("INSERT INTO sessions (id,user_id,title,created_at) VALUES (?,?,?,?)",
+                     (sid, r["id"], "New chat", time.time()))
+        conn.commit()
+    else:
+        sid = s["id"]
+    conn.close()
+    request.session["active_session"] = sid
     return JSONResponse({"ok": True})
-# Preferences API
-@app.get("/api/preferences")
-def get_preferences(user=Depends(get_current_user)):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT timezone, dark_mode, notifications FROM preferences WHERE user_id=?", (user["id"],))
-    prefs = cur.fetchone()
-    conn.close()
-    return {"timezone": prefs[0], "dark_mode": prefs[1], "notifications": prefs[2]}
-
-@app.post("/api/preferences")
-def update_preferences(prefs: dict, user=Depends(get_current_user)):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "REPLACE INTO preferences (user_id, timezone, dark_mode, notifications) VALUES (?, ?, ?, ?)",
-        (user["id"], prefs.get("timezone", "UTC"), int(prefs.get("dark_mode", 0)), int(prefs.get("notifications", 1))),
-    )
-    conn.commit()
-    conn.close()
-    return {"ok": True}
 
 @app.post("/api/logout")
 async def api_logout(request: Request):
@@ -924,22 +694,66 @@ def api_me(request: Request):
     uid = current_user_id(request)
     if not uid:
         return JSONResponse({"user": None})
-    u = get_user(uid)
+    conn = db()
+    u = conn.execute("SELECT id,email,display_name FROM users WHERE id=?", (uid,)).fetchone()
+    conn.close()
     plan = get_subscription(uid)
     return JSONResponse({"user": {"id": u["id"], "email": u["email"], "display_name": u["display_name"]}, "plan": plan})
 
-# -------- Preferences & Memories --------
-@app.post("/api/user/display_name")
-async def api_update_name(request: Request):
+# ---------- Account / Preferences ----------
+@app.get("/api/preferences")
+def api_get_preferences(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    conn = db()
+    conn.execute("INSERT OR IGNORE INTO preferences (user_id) VALUES (?)", (uid,))
+    row = conn.execute("""
+        SELECT timezone, dark_mode, notifications,
+               COALESCE(retain_memories,1) AS retain_memories,
+               COALESCE(chat_retention_days,90) AS chat_retention_days
+        FROM preferences WHERE user_id=?
+    """, (uid,)).fetchone()
+    conn.close()
+    return JSONResponse({
+        "timezone": row["timezone"], "dark_mode": row["dark_mode"], "notifications": row["notifications"],
+        "retain_memories": row["retain_memories"], "chat_retention_days": row["chat_retention_days"],
+    })
+
+@app.post("/api/preferences")
+async def api_update_preferences(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
     d = await request.json()
-    name = (d.get("display_name") or "").strip()
-    if not name: return JSONResponse({"error":"Display name required"}, status_code=400)
-    conn = db(); conn.execute("UPDATE users SET display_name=? WHERE id=?", (name, uid)); conn.commit(); conn.close()
+    tz  = (d.get("timezone") or "").strip() or None
+    dm  = 1 if d.get("dark_mode") else 0
+    nt  = 1 if d.get("notifications") else 0
+    rm  = 1 if d.get("retain_memories") else 0
+    crt = int(d.get("chat_retention_days") or 90)
+    conn = db()
+    conn.execute("INSERT OR IGNORE INTO preferences (user_id) VALUES (?)", (uid,))
+    conn.execute("""
+        UPDATE preferences
+           SET timezone = COALESCE(?, timezone),
+               dark_mode = ?,
+               notifications = ?,
+               retain_memories = ?,
+               chat_retention_days = ?
+         WHERE user_id = ?
+    """, (tz, dm, nt, rm, crt, uid))
+    if "display_name" in d:
+        conn.execute("UPDATE users SET display_name=? WHERE id=?", ((d["display_name"] or "").strip(), uid))
+    conn.commit()
+    # retention enforcement (delete non-saved sessions older than N days)
+    cutoff = time.time() - (crt * 86400)
+    conn.execute("""
+        DELETE FROM sessions WHERE user_id=? AND saved=0 AND created_at < ?
+    """, (uid, cutoff))
+    conn.commit(); conn.close()
     return JSONResponse({"ok": True})
 
-# -------- Memories --------
+# ---------- Memories ----------
 @app.get("/api/memories")
 def api_list_memories(request: Request):
     uid = current_user_id(request)
@@ -958,6 +772,9 @@ async def api_add_memory(request: Request):
     uid = current_user_id(request)
     if not uid:
         return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    if memories_count(uid) >= cfg["mem_limit"]:
+        return JSONResponse({"error":"Memory limit reached. Upgrade for more."}, status_code=403)
     d = await request.json()
     note = (d.get("note") or "").strip()
     if not note:
@@ -983,30 +800,15 @@ def api_delete_memory(request: Request, mem_id: str):
     conn.close()
     return JSONResponse({"ok": cur.rowcount > 0})
 
-    
-@app.delete("/api/memories/{mem_id}")
-def api_delete_memory(request: Request, mem_id: str = Path(...)):
-    uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
-    conn = db(); cur = conn.cursor()
-    cur.execute("DELETE FROM user_memories WHERE id=? AND user_id=?", (mem_id, uid))
-    conn.commit(); conn.close()
-    return JSONResponse({"ok": cur.rowcount > 0})
-# app.py (Chunk 4 of 5) — Sessions, Chat SSE, Coaching, Export, Limits
-from fastapi.responses import StreamingResponse
-
-# -------- Sessions & History --------
+# ---------- Sessions & History ----------
 @app.get("/api/sessions")
 def api_sessions(request: Request):
     uid = current_user_id(request)
     conn = db()
-    if uid:
-        rows = conn.execute("SELECT id, title, created_at FROM sessions WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
-    else:
-        rows = []
+    rows = conn.execute("SELECT id, title, created_at, saved FROM sessions WHERE user_id=? ORDER BY created_at DESC", (uid or -1,)).fetchall()
     conn.close()
     active = request.session.get("active_session")
-    return JSONResponse({"sessions":[{"id":r["id"],"title":r["title"],"created_at":r["created_at"]} for r in rows], "active": active})
+    return JSONResponse({"sessions":[{"id":r["id"],"title":r["title"],"created_at":r["created_at"],"saved":r["saved"]} for r in rows], "active": active})
 
 @app.post("/api/sessions")
 async def api_sessions_create(request: Request):
@@ -1027,29 +829,23 @@ async def api_session_select(request: Request):
     if not sid: return JSONResponse({"error":"session_id required"}, status_code=400)
     request.session["active_session"] = sid
     return JSONResponse({"ok": True})
-@app.post("/api/session/select")
-# -------- Delete a chat session --------
+
 @app.delete("/api/sessions/{sid}")
 def api_delete_session(request: Request, sid: str):
     uid = current_user_id(request)
     if not uid:
         return JSONResponse({"error":"Unauthorized"}, status_code=401)
-
     conn = db()
     owns = conn.execute("SELECT 1 FROM sessions WHERE id=? AND user_id=?", (sid, uid)).fetchone()
     if not owns:
         conn.close()
         return JSONResponse({"error":"Not found"}, status_code=404)
-
     conn.execute("DELETE FROM messages WHERE session_id=?", (sid,))
     cur = conn.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (sid, uid))
     conn.commit()
     conn.close()
-
-    # clear active session if it was the one deleted
     if request.session.get("active_session") == sid:
         request.session.pop("active_session", None)
-
     return JSONResponse({"ok": cur.rowcount > 0})
 
 @app.get("/api/history")
@@ -1062,7 +858,7 @@ def api_history(request: Request):
     conn.close()
     return JSONResponse({"messages":[{"role":r["role"],"content":r["content"],"ts":r["ts"]} for r in rows], "session_id": sid})
 
-# -------- Chat SSE --------
+# ---------- Chat (SSE stream) ----------
 @app.post("/api/chat/stream")
 async def api_chat_stream(request: Request):
     uid = current_user_id(request)
@@ -1073,7 +869,6 @@ async def api_chat_stream(request: Request):
     msg = (d.get("message") or "").strip()
     if not msg: return JSONResponse({"error":"Empty message"}, status_code=400)
 
-    # daily limit
     plan, cfg = plan_cfg(uid)
     used = chat_messages_today(uid)
     if used >= cfg["chat_daily"]:
@@ -1083,7 +878,6 @@ async def api_chat_stream(request: Request):
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen_limit(), media_type="text/event-stream")
 
-    # ensure session
     sid = request.session.get("active_session")
     if not sid:
         sid = str(uuid.uuid4())
@@ -1091,7 +885,6 @@ async def api_chat_stream(request: Request):
                                   (sid, uid, "New chat", time.time())); conn.commit(); conn.close()
         request.session["active_session"] = sid
 
-    # crisis guard
     guard = crisis_guard(msg)
     conn = db()
     conn.execute("INSERT INTO messages (session_id, role, content, ts) VALUES (?,?,?,?)", (sid, "user", msg, time.time()))
@@ -1110,7 +903,6 @@ async def api_chat_stream(request: Request):
         {"role":"system","content": current_time_note()},
     ]
     if mem_text: messages.append({"role":"system","content": mem_text})
-    # include last ~20 turns
     conn = db()
     hist = conn.execute("SELECT role, content FROM messages WHERE session_id=? ORDER BY ts DESC LIMIT 20", (sid,)).fetchall()
     conn.close()
@@ -1141,7 +933,7 @@ async def api_chat_stream(request: Request):
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
-# -------- Coaching APIs --------
+# ---------- Coaching ----------
 DAILY_REFLECTIONS = [
     "What went well today, and what made it work?",
     "What small win are you most proud of?",
@@ -1151,12 +943,9 @@ DAILY_REFLECTIONS = [
 ]
 
 @app.get("/api/coaching/daily")
-def api_coaching_daily(request: Request):
+def api_coaching_daily():
     from random import choice
-    uid = current_user_id(request)
-    # we allow reading the prompt without auth, but encourage sign-in to save
-    prompt = choice(DAILY_REFLECTIONS)
-    return JSONResponse({"prompt": prompt})
+    return JSONResponse({"prompt": choice(DAILY_REFLECTIONS)})
 
 @app.post("/api/coaching/start")
 async def api_coaching_start(request: Request):
@@ -1169,53 +958,77 @@ async def api_coaching_start(request: Request):
     d = await request.json()
     topic = (d.get("topic") or "").strip()
     if not topic: return JSONResponse({"error":"Topic required"}, status_code=400)
-
-    name = (get_user(uid)["display_name"] or "friend")
-    messages = [
-        {"role":"system","content": SYSTEM_PROMPT},
-        {"role":"system","content": COACHING_STYLE},
-        {"role":"system","content": current_time_note()},
-        {"role":"user","content": f"My coaching topic today: {topic}"},
-        {"role":"assistant","content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences."}
+messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": COACHING_STYLE},
+        {"role": "system", "content": current_time_note()},
+        {"role": "user", "content": f"My coaching topic today: {topic}"},
+        {"role": "assistant", "content": "Thanks for sharing. What would 'good' look like 7 days from now? One or two sentences."},
     ]
-    opening = llm_chat(cfg["model"], 200, messages) or "Let’s begin: what would 'good' look like 7 days from now?"
-    # persist a coaching row
-    conn = db(); conn.execute("INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
-                              (uid, topic, json.dumps({"opening": opening}), datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
+
+    try:
+        resp = _client.chat.completions.create(
+            model=cfg["model"],
+            messages=messages,
+            temperature=0.7,
+            max_tokens=200,
+        )
+        opening = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        opening = f"(LLM error: {e})"
+
+    conn = db()
+    conn.execute(
+        "INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
+        (uid, topic, json.dumps({"opening": opening}), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
     return JSONResponse({"ok": True, "opening": opening})
 
 @app.post("/api/coaching/save")
 async def api_coaching_save(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
     d = await request.json()
     topic = (d.get("topic") or "").strip()
     notes = (d.get("notes") or "").strip()
-    if not topic or not notes: return JSONResponse({"error":"topic and notes required"}, status_code=400)
+    if not topic or not notes:
+        return JSONResponse({"error":"topic and notes required"}, status_code=400)
     conn = db()
-    conn.execute("INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
-                 (uid, topic, notes, datetime.utcnow().isoformat()))
-    conn.commit(); conn.close()
+    conn.execute(
+        "INSERT INTO coaching (user_id, topic, reflections, created_at) VALUES (?,?,?,?)",
+        (uid, topic, notes, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
     return JSONResponse({"ok": True})
 
 @app.get("/api/coaching/list")
 def api_coaching_list(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
     conn = db()
-    rows = conn.execute("SELECT id, topic, reflections, created_at FROM coaching WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    rows = conn.execute(
+        "SELECT id, topic, reflections, created_at FROM coaching WHERE user_id=? ORDER BY created_at DESC",
+        (uid,)
+    ).fetchall()
     conn.close()
-    out = [{"id": r["id"], "topic": r["topic"], "reflections": r["reflections"], "created_at": r["created_at"]} for r in rows]
+    out = [
+        {"id": r["id"], "topic": r["topic"], "reflections": r["reflections"], "created_at": r["created_at"]}
+        for r in rows
+    ]
     return JSONResponse({"items": out})
 
-# -------- Limits + Export --------
+# ---------- Limits + Export ----------
 @app.get("/api/limits")
 def api_limits(request: Request):
     uid = current_user_id(request)
     plan, cfg = plan_cfg(uid)
-    used = chat_messages_today(uid)
-    coach_used = coaching_sessions_today(uid)
+    used = chat_messages_today(uid) if uid else 0
+    coach_used = coaching_sessions_today(uid) if uid else 0
     remaining = max(cfg["chat_daily"] - used, 0)
     return JSONResponse({
         "plan": plan, "plan_name": cfg["name"],
@@ -1223,43 +1036,70 @@ def api_limits(request: Request):
         "allow_export_csv": cfg["allow_export_csv"],
         "coach_daily": cfg["coach_daily"], "coach_used": coach_used
     })
+
+@app.get("/api/export")
+def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    plan, cfg = plan_cfg(uid)
+    if fmt == "csv" and not cfg["allow_export_csv"]:
+        return JSONResponse({"error":"CSV export is available on Plus & Pro."}, status_code=403)
+    sid = request.session.get("active_session")
+    if not sid:
+        return JSONResponse({"error":"No session"}, status_code=400)
+    conn = db()
+    rows = conn.execute(
+        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)
+    ).fetchall()
+    conn.close()
+    now = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
+    if fmt == "txt":
+        lines = []
+        for r in rows:
+            t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
+            who = "User" if r["role"]=="user" else ("Assistant" if r["role"]=="assistant" else r["role"])
+            lines.append(f"[{t}] {who}: {r['content']}")
+        return PlainTextResponse(
+            "\n".join(lines)+"\n",
+            headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.txt"'}
+        )
+    # CSV
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["time_utc","role","content"])
+    for r in rows:
+        t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
+        w.writerow([t, r["role"], r["content"]])
+    return PlainTextResponse(
+        out.getvalue(),
+        headers={
+            "Content-Disposition": f'attachment; filename="kindcoach_{now}.csv"',
+            "Content-Type": "text/csv; charset=utf-8"
+        }
+    )
+
 @app.get("/api/chat/export")
-def export_chats(user=Depends(get_current_user)):
+def api_chat_export_json(request: Request):
+    """JSON export (used by the .json button)."""
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    sid = request.session.get("active_session")
+    if not sid:
+        return JSONResponse({"error":"No session"}, status_code=400)
     conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, title, created_at FROM sessions WHERE user_id=?", (user["id"],))
-    sessions = cur.fetchall()
-    export_data = []
-    for s in sessions:
-        cur.execute("SELECT role, content, ts FROM messages WHERE session_id=?", (s[0],))
-        messages = cur.fetchall()
-        export_data.append({
-            "id": s[0],
-            "title": s[1],
-            "created_at": s[2],
-            "messages": [{"role": m[0], "content": m[1], "ts": m[2]} for m in messages]
-        })
+    rows = conn.execute(
+        "SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)
+    ).fetchall()
     conn.close()
-    return JSONResponse(content=export_data)
+    payload = [
+        {"time_utc": datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z", "role": r["role"], "content": r["content"]}
+        for r in rows
+    ]
+    return JSONResponse({"session_id": sid, "messages": payload})
 
-        headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.csv"', "Content-Type":"text/csv; charset=utf-8"})
-# app.py (Chunk 5 of 5) — Pricing page, Stripe Checkout/Portal/Webhook, Health
-
-from typing import Optional
-import json, sys, sqlite3
-from fastapi import Request, Query
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
-# Delete a chat session
-@app.delete("/api/chat/{session_id}")
-def delete_chat(session_id: str, user=Depends(get_current_user)):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (session_id, user["id"]))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-# ---- Pricing page ----
+# ---------- Pricing page ----------
 @app.get("/pricing", response_class=HTMLResponse)
 def pricing_page(request: Request):
     uid = current_user_id(request)
@@ -1281,12 +1121,8 @@ def pricing_page(request: Request):
     )
     return HTMLResponse(PRICING_TOP.replace("{portal}", portal).replace("{warn}", warn) + cards + PRICING_BOTTOM)
 
-
-# ---- Stripe helpers ----
+# ---------- Stripe helpers / routes ----------
 def get_or_create_stripe_customer(user_row: sqlite3.Row) -> str:
-    """
-    Ensure a Stripe Customer exists for the given app user; persist id to users.stripe_customer_id.
-    """
     if not STRIPE_READY:
         raise RuntimeError("Stripe not configured")
     if user_row["stripe_customer_id"]:
@@ -1298,8 +1134,6 @@ def get_or_create_stripe_customer(user_row: sqlite3.Row) -> str:
     conn.close()
     return cust.id
 
-
-# ---- Checkout / Portal ----
 @app.post("/billing/checkout")
 async def billing_checkout(request: Request):
     if not STRIPE_READY or not prices_loaded() or not PUBLIC_URL:
@@ -1307,17 +1141,14 @@ async def billing_checkout(request: Request):
     uid = current_user_id(request)
     if not uid:
         return RedirectResponse("/app?mode=login", status_code=303)
-
-    user = get_user(uid)
+    user = db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     form = await request.form()
     plan = (form.get("plan") or "").strip().lower()
-    if plan not in ("plus", "pro"):
+    if plan not in ("plus","pro"):
         return HTMLResponse("<h3>Unknown plan</h3>", status_code=400)
-
     price_id = STRIPE_PRICE_PLUS if plan == "plus" else STRIPE_PRICE_PRO
     customer_id = get_or_create_stripe_customer(user)
-
-    session = stripe.checkout.Session.create(
+    sess = stripe.checkout.Session.create(
         mode="subscription",
         payment_method_types=["card"],
         customer=customer_id,
@@ -1326,15 +1157,14 @@ async def billing_checkout(request: Request):
         cancel_url=f"{PUBLIC_URL}/pricing",
         metadata={"app_user_id": str(uid), "app_plan": plan},
     )
-    return RedirectResponse(session.url, status_code=303)
-
+    return RedirectResponse(sess.url, status_code=303)
 
 @app.get("/billing/success", response_class=HTMLResponse)
 def billing_success(session_id: str = Query(None)):
     msg = "<p class='small'>If your payment succeeded, your plan will update shortly.</p>"
     if STRIPE_READY and session_id:
         try:
-            sess = stripe.checkout.Session.retrieve(session_id, expand=["subscription", "line_items"])
+            sess = stripe.checkout.Session.retrieve(session_id, expand=["subscription","line_items"])
             if sess and sess.subscription:
                 msg = "<p class='small'>Subscription created. It may take a few seconds to reflect in the app.</p>"
         except Exception:
@@ -1344,7 +1174,6 @@ def billing_success(session_id: str = Query(None)):
         f"<p><a href='/pricing'>Back to pricing</a> · <a href='/app'>Open app</a></p></div>"
     )
 
-
 @app.post("/billing/portal")
 def billing_portal(request: Request):
     if not STRIPE_READY or not PUBLIC_URL:
@@ -1352,21 +1181,17 @@ def billing_portal(request: Request):
     uid = current_user_id(request)
     if not uid:
         return RedirectResponse("/app?mode=login", status_code=303)
-    user = get_user(uid)
+    user = db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     portal = stripe.billing_portal.Session.create(
         customer=get_or_create_stripe_customer(user),
         return_url=f"{PUBLIC_URL}/pricing",
     )
     return RedirectResponse(portal.url, status_code=303)
 
-
-# ---- Stripe webhook ----
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
     if not STRIPE_READY:
-        # In dev, silently acknowledge
         return JSONResponse({"ok": True})
-
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
     try:
@@ -1398,17 +1223,14 @@ async def stripe_webhook(request: Request):
                 user = find_user_by_customer(customer_id)
                 if user:
                     set_plan(
-                        user["id"],
-                        plan,
-                        sub_id=subscription["id"],
-                        status=subscription["status"],
-                        cpe=int(subscription["current_period_end"]),
+                        user["id"], plan,
+                        sub_id=subscription["id"], status=subscription["status"],
+                        cpe=int(subscription["current_period_end"])
                     )
 
         elif etype in ("customer.subscription.created", "customer.subscription.updated"):
             sub = data
             customer_id = sub.get("customer")
-            # price → plan
             price_id = None
             try:
                 price_id = sub["items"]["data"][0]["price"]["id"]
@@ -1417,13 +1239,11 @@ async def stripe_webhook(request: Request):
             plan = map_price_to_plan(price_id) if price_id else None
             user = find_user_by_customer(customer_id) if customer_id else None
             if user:
-                effective = (plan or "free") if sub["status"] in ("active", "trialing", "past_due") else "free"
+                effective = (plan or "free") if sub["status"] in ("active","trialing","past_due") else "free"
                 set_plan(
-                    user["id"],
-                    effective,
-                    sub_id=sub["id"],
-                    status=sub["status"],
-                    cpe=int(sub["current_period_end"]) if sub.get("current_period_end") else None,
+                    user["id"], effective,
+                    sub_id=sub["id"], status=sub["status"],
+                    cpe=int(sub["current_period_end"]) if sub.get("current_period_end") else None
                 )
 
         elif etype in ("customer.subscription.deleted", "customer.subscription.cancelled"):
@@ -1437,11 +1257,10 @@ async def stripe_webhook(request: Request):
         print("Webhook handling error:", e, file=sys.stderr)
 
     return JSONResponse({"received": True})
-
-
-# ---- Health ----
+    # ---------- Health ----------
 @app.get("/health")
 def health():
+    """Health check endpoint for monitoring and uptime verification."""
     try:
         conn = db()
         conn.execute("SELECT 1")
@@ -1450,6 +1269,18 @@ def health():
             "ok": True,
             "stripe": bool(STRIPE_READY),
             "prices_loaded": prices_loaded(),
+            "time": datetime.utcnow().isoformat() + "Z"
         }
     except Exception as e:
         return PlainTextResponse(str(e), status_code=500)
+
+
+# ---------- Main ----------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),
+        reload=True
+    )
