@@ -167,60 +167,24 @@ COACHING_STYLE = (
     "Prefer questions to advice. Keep replies under ~200 words unless asked."
 )
 
-# ---------- DB helpers ----------
-def ensure_preferences_schema():
-    conn = db()
-    cur = conn.cursor()
-    # Create table if missing (you already have this in init, but safe to keep)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS preferences (
-            user_id INTEGER PRIMARY KEY,
-            timezone TEXT DEFAULT 'UTC',
-            dark_mode INTEGER DEFAULT 0,
-            notifications INTEGER DEFAULT 1,
-            save_memories INTEGER DEFAULT 1,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    """)
-    # Add save_memories if it’s missing
-    cols = [c[1] for c in cur.execute("PRAGMA table_info(preferences)")]
-    if "save_memories" not in cols:
-        cur.execute("ALTER TABLE preferences ADD COLUMN save_memories INTEGER DEFAULT 1")
-    conn.commit()
-    conn.close()
-def get_or_create_preferences(uid: int) -> sqlite3.Row:
-    conn = db()
-    row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
-    if not row:
-        conn.execute("INSERT INTO preferences (user_id) VALUES (?)", (uid,))
-        conn.commit()
-        row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
-    conn.close()
-    return row
+# ----------------------------
+# Database connection + helpers
+# ----------------------------
+import os, sqlite3
 
-def update_preferences(uid: int, timezone: str, dark_mode: int, notifications: int, save_memories: int):
-    conn = db()
-    conn.execute("""
-        INSERT INTO preferences (user_id, timezone, dark_mode, notifications, save_memories)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          timezone=excluded.timezone,
-          dark_mode=excluded.dark_mode,
-          notifications=excluded.notifications,
-          save_memories=excluded.save_memories
-    """, (uid, timezone, dark_mode, notifications, save_memories))
-    conn.commit()
-    conn.close()
-
-# Call it during startup (where you call other ensure_* functions):
-ensure_preferences_schema()
+# Resolve DB path from env; fall back to local file
+APP_DB_PATH = (
+    os.getenv("APP_DB_PATH")
+    or (os.getenv("DATA_DIR") and os.path.join(os.getenv("DATA_DIR"), "app.db"))
+    or "app.db"
+)
 
 def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(APP_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db():
+def init_db() -> None:
     conn = db()
     cur = conn.cursor()
 
@@ -316,116 +280,63 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
 
-# ---------- Feature helpers ----------
-def current_user_id(request: Request) -> Optional[int]:
-    return request.session.get("user_id")
-
-def ensure_subscription_row(uid: int):
+def ensure_preferences_schema() -> None:
+    """Ensure preferences table exists and has all expected columns."""
     conn = db()
-    r = conn.execute("SELECT user_id FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
-    if not r:
-        conn.execute(
-            "INSERT INTO subscriptions (user_id, plan, status, started_at) VALUES (?, 'free', 'active', ?)",
-            (uid, datetime.utcnow().isoformat()),
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT DEFAULT 'UTC',
+            dark_mode INTEGER DEFAULT 0,
+            notifications INTEGER DEFAULT 1,
+            retain_memories INTEGER DEFAULT 1,
+            chat_retention_days INTEGER DEFAULT 90,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-        conn.commit()
-    conn.close()
-
-def set_plan(uid: int, plan: str, sub_id: Optional[str] = None, status: Optional[str] = None, cpe: Optional[int] = None):
-    if plan not in PLANS: plan = "free"
-    conn = db()
-    conn.execute("""
-        INSERT INTO subscriptions (user_id, plan, stripe_subscription_id, status, current_period_end, started_at)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(user_id) DO UPDATE SET
-          plan=excluded.plan,
-          stripe_subscription_id=excluded.stripe_subscription_id,
-          status=excluded.status,
-          current_period_end=excluded.current_period_end
-    """, (uid, plan, sub_id, status, cpe, datetime.utcnow().isoformat()))
+    """)
+    # check if save_memories column is missing
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(preferences)")]
+    if "save_memories" not in cols:
+        cur.execute("ALTER TABLE preferences ADD COLUMN save_memories INTEGER DEFAULT 1")
     conn.commit()
     conn.close()
 
-def get_subscription(uid: Optional[int]) -> str:
-    if not uid: return "free"
+
+def get_or_create_preferences(uid: int) -> sqlite3.Row:
     conn = db()
-    r = conn.execute("SELECT plan, status FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
+    row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        conn.execute("INSERT INTO preferences (user_id) VALUES (?)", (uid,))
+        conn.commit()
+        row = conn.execute("SELECT * FROM preferences WHERE user_id=?", (uid,)).fetchone()
     conn.close()
-    if not r: return "free"
-    plan, status = r["plan"], (r["status"] or "")
-    if plan in ("plus","pro") and status not in ("active","trialing","past_due"):
-        return "free"
-    return plan if plan in PLANS else "free"
+    return row
 
-def plan_cfg(uid: Optional[int]) -> Tuple[str, Dict[str, Any]]:
-    p = get_subscription(uid)
-    return p, PLANS[p]
 
-def memories_count(uid: Optional[int]) -> int:
-    if not uid: return 0
+def update_preferences(uid: int, timezone: str, dark_mode: int, notifications: int, save_memories: int):
     conn = db()
-    cnt = conn.execute("SELECT COUNT(*) AS c FROM user_memories WHERE user_id=?", (uid,)).fetchone()["c"]
+    conn.execute("""
+        INSERT INTO preferences (user_id, timezone, dark_mode, notifications, save_memories)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          timezone=excluded.timezone,
+          dark_mode=excluded.dark_mode,
+          notifications=excluded.notifications,
+          save_memories=excluded.save_memories
+    """, (uid, timezone, dark_mode, notifications, save_memories))
+    conn.commit()
     conn.close()
-    return int(cnt)
 
-def day_bounds_epoch(tz_name: str) -> Tuple[float, float]:
-    tz = ZoneInfo(tz_name)
-    now = datetime.now(tz)
-    start = datetime(now.year, now.month, now.day, 0,0,0, tzinfo=tz)
-    end   = datetime(now.year, now.month, now.day, 23,59,59, tzinfo=tz)
-    return start.timestamp(), end.timestamp()
 
-def chat_messages_today(uid: Optional[int]) -> int:
-    if not uid: return 0
-    start, end = day_bounds_epoch(APP_TZ)
-    conn = db()
-    cnt = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM messages m
-        JOIN sessions s ON s.id = m.session_id
-        WHERE s.user_id = ? AND m.role='user' AND m.ts BETWEEN ? AND ?
-    """, (uid, start, end)).fetchone()["c"]
-    conn.close()
-    return int(cnt)
-
-def coaching_sessions_today(uid: Optional[int]) -> int:
-    if not uid: return 0
-    start, end = day_bounds_epoch(APP_TZ)
-    conn = db()
-    cnt = conn.execute("""
-        SELECT COUNT(*) AS c FROM coaching
-        WHERE user_id = ? AND created_at BETWEEN ? AND ?
-    """, (uid, datetime.fromtimestamp(start).isoformat(), datetime.fromtimestamp(end).isoformat())).fetchone()["c"]
-    conn.close()
-    return int(cnt)
-
-def get_user_memories_text(uid: Optional[int], limit: int) -> Optional[str]:
-    if not uid: return None
-    conn = db()
-    rows = conn.execute(
-        "SELECT note FROM user_memories WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-        (uid, limit)
-    ).fetchall()
-    conn.close()
-    if not rows: return None
-    bullets = "\n".join(f"- {r['note']}" for r in rows)
-    return "User-approved memory notes:\n" + bullets
-
-def crisis_guard(text: str) -> Optional[str]:
-    lowered = text.lower()
-    for k in ["suicide","kill myself","self-harm","end my life","overdose","hurt myself"]:
-        if k in lowered:
-            return ("I'm really glad you reached out. You deserve support.\n\n"
-                    "If you're in the UK, you can call **Samaritans 116 123** any time, "
-                    "or visit A&E / call **999** in an emergency.\n"
-                    "I'm here to keep you company, but I'm not a substitute for professional help.")
-    return None
-
-def current_time_note():
-    now_local = datetime.now(ZoneInfo(APP_TZ))
-    return f"Today is {now_local.strftime('%A %d %B %Y')} and the local time is {now_local.strftime('%H:%M')} in {APP_TZ}."
+# ----------------------------
+# Run DB setup ONLY on startup
+# ----------------------------
+@app.on_event("startup")
+def _startup() -> None:
+    init_db()
+    ensure_preferences_schema()
 
 # ---------- UI (Landing + App) ----------
 LANDING_HTML = r"""<!doctype html><html lang="en"><head>
