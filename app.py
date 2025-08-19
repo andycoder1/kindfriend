@@ -812,6 +812,43 @@ def app_page():
 @app.get("/account", response_class=HTMLResponse)
 def account_page():
     return HTMLResponse(ACCOUNT_HTML)
+# -------- Preferences API (profile + memory policy) --------
+@app.get("/api/preferences")
+def api_get_preferences(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    conn = db()
+    # ensure row exists
+    conn.execute("INSERT OR IGNORE INTO preferences (user_id) VALUES (?)", (uid,))
+    row = conn.execute("""
+        SELECT timezone,
+               dark_mode,
+               notifications,
+               COALESCE(retain_memories, 1)      AS retain_memories,
+               COALESCE(chat_retention_days, 90) AS chat_retention_days
+        FROM preferences WHERE user_id=?
+    """, (uid,)).fetchone()
+    conn.close()
+    return JSONResponse({
+        "timezone": row["timezone"],
+        "dark_mode": row["dark_mode"],
+        "notifications": row["notifications"],
+        "retain_memories": row["retain_memories"],
+        "chat_retention_days": row["chat_retention_days"],
+    })
+
+@app.post("/api/preferences")
+async def api_update_preferences(request: Request):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    d = await request.json()
+    tz  = (d.get("timezone") or "").strip() or None
+    dm  = 1 if d.get("dark_mode") else 0
+    nt  = 1 if d.get("notifications") else 0
+    rm  = 1 if d.get("retain_memories") else 0
+    crt = i
 
 # -------- Auth APIs (session-based) --------
 @app.post("/api/register")
@@ -855,6 +892,27 @@ async def api_login(request: Request):
     request.session["user_id"] = r["id"]
     ensure_subscription_row(r["id"])
     return JSONResponse({"ok": True})
+# Preferences API
+@app.get("/api/preferences")
+def get_preferences(user=Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT timezone, dark_mode, notifications FROM preferences WHERE user_id=?", (user["id"],))
+    prefs = cur.fetchone()
+    conn.close()
+    return {"timezone": prefs[0], "dark_mode": prefs[1], "notifications": prefs[2]}
+
+@app.post("/api/preferences")
+def update_preferences(prefs: dict, user=Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "REPLACE INTO preferences (user_id, timezone, dark_mode, notifications) VALUES (?, ?, ?, ?)",
+        (user["id"], prefs.get("timezone", "UTC"), int(prefs.get("dark_mode", 0)), int(prefs.get("notifications", 1))),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 @app.post("/api/logout")
 async def api_logout(request: Request):
@@ -881,29 +939,50 @@ async def api_update_name(request: Request):
     conn = db(); conn.execute("UPDATE users SET display_name=? WHERE id=?", (name, uid)); conn.commit(); conn.close()
     return JSONResponse({"ok": True})
 
+# -------- Memories --------
 @app.get("/api/memories")
 def api_list_memories(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
     conn = db()
-    rows = conn.execute("SELECT id, note, created_at FROM user_memories WHERE user_id=? ORDER BY created_at DESC", (uid,)).fetchall()
+    rows = conn.execute(
+        "SELECT id, note, created_at FROM user_memories WHERE user_id=? ORDER BY created_at DESC",
+        (uid,)
+    ).fetchall()
     conn.close()
     return JSONResponse({"memories":[{"id":r["id"],"note":r["note"],"created_at":r["created_at"]} for r in rows]})
 
 @app.post("/api/memories")
 async def api_add_memory(request: Request):
     uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
-    plan, cfg = plan_cfg(uid)
-    if memories_count(uid) >= cfg["mem_limit"]:
-        return JSONResponse({"error":"Memory limit reached. Upgrade for more."}, status_code=403)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
     d = await request.json()
     note = (d.get("note") or "").strip()
-    if not note: return JSONResponse({"error":"Note required"}, status_code=400)
+    if not note:
+        return JSONResponse({"error":"Note required"}, status_code=400)
     mid = str(uuid.uuid4())
-    conn = db(); conn.execute("INSERT INTO user_memories (id,user_id,note,created_at) VALUES (?,?,?,?)",
-                              (mid, uid, note, datetime.utcnow().isoformat())); conn.commit(); conn.close()
+    conn = db()
+    conn.execute(
+        "INSERT INTO user_memories (id, user_id, note, created_at) VALUES (?,?,?,?)",
+        (mid, uid, note, datetime.utcnow().isoformat())
+    )
+    conn.commit()
+    conn.close()
     return JSONResponse({"ok": True, "id": mid})
+
+@app.delete("/api/memories/{mem_id}")
+def api_delete_memory(request: Request, mem_id: str):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+    conn = db()
+    cur = conn.execute("DELETE FROM user_memories WHERE id=? AND user_id=?", (mem_id, uid))
+    conn.commit()
+    conn.close()
+    return JSONResponse({"ok": cur.rowcount > 0})
+
     
 @app.delete("/api/memories/{mem_id}")
 def api_delete_memory(request: Request, mem_id: str = Path(...)):
@@ -948,6 +1027,30 @@ async def api_session_select(request: Request):
     if not sid: return JSONResponse({"error":"session_id required"}, status_code=400)
     request.session["active_session"] = sid
     return JSONResponse({"ok": True})
+@app.post("/api/session/select")
+# -------- Delete a chat session --------
+@app.delete("/api/sessions/{sid}")
+def api_delete_session(request: Request, sid: str):
+    uid = current_user_id(request)
+    if not uid:
+        return JSONResponse({"error":"Unauthorized"}, status_code=401)
+
+    conn = db()
+    owns = conn.execute("SELECT 1 FROM sessions WHERE id=? AND user_id=?", (sid, uid)).fetchone()
+    if not owns:
+        conn.close()
+        return JSONResponse({"error":"Not found"}, status_code=404)
+
+    conn.execute("DELETE FROM messages WHERE session_id=?", (sid,))
+    cur = conn.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (sid, uid))
+    conn.commit()
+    conn.close()
+
+    # clear active session if it was the one deleted
+    if request.session.get("active_session") == sid:
+        request.session.pop("active_session", None)
+
+    return JSONResponse({"ok": cur.rowcount > 0})
 
 @app.get("/api/history")
 def api_history(request: Request):
@@ -1120,31 +1223,25 @@ def api_limits(request: Request):
         "allow_export_csv": cfg["allow_export_csv"],
         "coach_daily": cfg["coach_daily"], "coach_used": coach_used
     })
+@app.get("/api/chat/export")
+def export_chats(user=Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, title, created_at FROM sessions WHERE user_id=?", (user["id"],))
+    sessions = cur.fetchall()
+    export_data = []
+    for s in sessions:
+        cur.execute("SELECT role, content, ts FROM messages WHERE session_id=?", (s[0],))
+        messages = cur.fetchall()
+        export_data.append({
+            "id": s[0],
+            "title": s[1],
+            "created_at": s[2],
+            "messages": [{"role": m[0], "content": m[1], "ts": m[2]} for m in messages]
+        })
+    conn.close()
+    return JSONResponse(content=export_data)
 
-@app.get("/api/export")
-def api_export(request: Request, fmt: str = Query("txt", pattern="^(txt|csv)$")):
-    uid = current_user_id(request)
-    if not uid: return JSONResponse({"error":"Unauthorized"}, status_code=401)
-    plan, cfg = plan_cfg(uid)
-    if fmt == "csv" and not cfg["allow_export_csv"]:
-        return JSONResponse({"error":"CSV export is available on Plus & Pro."}, status_code=403)
-    sid = request.session.get("active_session")
-    if not sid: return JSONResponse({"error":"No session"}, status_code=400)
-    conn = db(); rows = conn.execute("SELECT role, content, ts FROM messages WHERE session_id=? ORDER BY ts ASC", (sid,)).fetchall(); conn.close()
-    now = datetime.utcnow().strftime("%Y%m%d_%H%M%SZ")
-    if fmt == "txt":
-        lines=[]
-        for r in rows:
-            t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"
-            who = "User" if r["role"]=="user" else ("Assistant" if r["role"]=="assistant" else r["role"])
-            lines.append(f"[{t}] {who}: {r['content']}")
-        return PlainTextResponse("\n".join(lines)+"\n",
-            headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.txt"'})
-    # CSV
-    out = io.StringIO(); w = csv.writer(out); w.writerow(["time_utc","role","content"])
-    for r in rows:
-        t = datetime.utcfromtimestamp(r["ts"]).isoformat()+"Z"; w.writerow([t, r["role"], r["content"]])
-    return PlainTextResponse(out.getvalue(),
         headers={"Content-Disposition": f'attachment; filename="kindcoach_{now}.csv"', "Content-Type":"text/csv; charset=utf-8"})
 # app.py (Chunk 5 of 5) — Pricing page, Stripe Checkout/Portal/Webhook, Health
 
@@ -1152,6 +1249,15 @@ from typing import Optional
 import json, sys, sqlite3
 from fastapi import Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, PlainTextResponse
+# Delete a chat session
+@app.delete("/api/chat/{session_id}")
+def delete_chat(session_id: str, user=Depends(get_current_user)):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (session_id, user["id"]))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 # ---- Pricing page ----
 @app.get("/pricing", response_class=HTMLResponse)
