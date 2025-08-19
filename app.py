@@ -83,6 +83,26 @@ else:
     _client = None
     LLM_READY = False
     print("⚠ OPENAI_API_KEY not set", file=sys.stderr)
+# ---------- LLM helper ----------
+def llm_chat(model: str, max_tokens: int, messages):
+    """
+    Thin wrapper around OpenAI Chat Completions.
+    Returns the assistant message string or "" on failure.
+    """
+    if not LLM_READY or _client is None:
+        return ""
+    try:
+        resp = _client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        # Log and degrade gracefully
+        print(f"[LLM error] {e}", file=sys.stderr)
+        return ""
 
 # ---------- Stripe (optional) ----------
 PUBLIC_URL             = os.getenv("PUBLIC_URL", "http://localhost:8000")
