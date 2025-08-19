@@ -54,86 +54,86 @@ def db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
-001 def init_db():
-002     conn = db()
-003     cur = conn.cursor()
-004 
-005     # users
-006     cur.execute("""
-007         CREATE TABLE IF NOT EXISTS users (
-008             id INTEGER PRIMARY KEY AUTOINCREMENT,
-009             email TEXT UNIQUE NOT NULL,
-010             password_hash TEXT NOT NULL,
-011             display_name TEXT,
-012             tier TEXT DEFAULT 'free',
-013             created_at TEXT NOT NULL,
-014             stripe_customer_id TEXT
-015         )
-016     """)
-017 
-018     # preferences
-019     cur.execute("""
-020         CREATE TABLE IF NOT EXISTS preferences (
-021             user_id INTEGER PRIMARY KEY,
-022             timezone TEXT DEFAULT 'UTC',
-023             dark_mode INTEGER DEFAULT 0,
-024             notifications INTEGER DEFAULT 1,
-025             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-026         )
-027     """)
-028 
-029     # user memories (for coaching/journaling)
-030     cur.execute("""
-031         CREATE TABLE IF NOT EXISTS user_memories (
-032             id TEXT PRIMARY KEY,
-033             user_id INTEGER NOT NULL,
-034             note TEXT NOT NULL,
-035             created_at TEXT NOT NULL,
-036             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-037         )
-038     """)
-039 
-040     # chat sessions
-041     cur.execute("""
-042         CREATE TABLE IF NOT EXISTS sessions (
-043             id TEXT PRIMARY KEY,
-044             user_id INTEGER NOT NULL,
-045             title TEXT,
-046             created_at REAL NOT NULL,
-047             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-048         )
-049     """)
-050 
-051     # chat messages
-052     cur.execute("""
-053         CREATE TABLE IF NOT EXISTS messages (
-054             session_id TEXT NOT NULL,
-055             role TEXT NOT NULL,     -- 'user' | 'assistant'
-056             content TEXT NOT NULL,
-057             ts REAL NOT NULL,
-058             FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
-059         )
-060     """)
-061 
-062     # coaching sessions
-063     cur.execute("""
-064         CREATE TABLE IF NOT EXISTS coaching (
-065             id INTEGER PRIMARY KEY AUTOINCREMENT,
-066             user_id INTEGER NOT NULL,
-067             topic TEXT NOT NULL,
-068             reflections TEXT NOT NULL,
-069             created_at TEXT NOT NULL,
-070             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-071         )
-072     """)
-073 
-074     # optional indices for performance
-075     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-076     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts)")
-077     cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id)")
-078 
-079     conn.commit()
-080     conn.close()
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+
+    # users
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            display_name TEXT,
+            tier TEXT DEFAULT 'free',
+            created_at TEXT NOT NULL,
+            stripe_customer_id TEXT
+        )
+    """)
+
+    # preferences
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS preferences (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT DEFAULT 'UTC',
+            dark_mode INTEGER DEFAULT 0,
+            notifications INTEGER DEFAULT 1,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # user memories (for coaching/journaling)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_memories (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            note TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # chat sessions
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            title TEXT,
+            created_at REAL NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # chat messages
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,     -- 'user' | 'assistant'
+            content TEXT NOT NULL,
+            ts REAL NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+    """)
+
+    # coaching sessions
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS coaching (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            topic TEXT NOT NULL,
+            reflections TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
+    # optional indices for performance
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id)")
+
+    conn.commit()
+    conn.close()
 
 
 init_db()
