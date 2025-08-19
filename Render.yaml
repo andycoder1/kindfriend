@@ -1,0 +1,51 @@
+# render.yaml
+services:
+  - type: web
+    name: kind-friend
+    env: python
+    region: frankfurt            # or oregon/virginia/etc
+    plan: starter                # or free, depending on needs
+    autoDeploy: true
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /health
+    envVars:
+      # --- Core app ---
+      - key: SECRET_KEY
+        sync: false              # set in Render dashboard
+      - key: APP_TZ
+        value: Europe/London
+      - key: PUBLIC_URL
+        sync: false              # e.g. https://kind-friend.onrender.com
+      - key: DATA_DIR
+        value: /data             # persistent disk mount for SQLite
+
+      # --- OpenAI ---
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL_FREE
+        value: gpt-4o-mini
+      - key: OPENAI_MODEL_PLUS
+        value: gpt-4o-mini
+      - key: OPENAI_MODEL_PRO
+        value: gpt-4o
+
+      # --- Stripe (live or test) ---
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_PLUS      # the £4.99/mo Price ID (from Stripe)
+        sync: false
+      - key: STRIPE_PRICE_PRO       # the £7.99/mo Price ID (from Stripe)
+        sync: false
+
+    # Persistent disk for your SQLite database
+    disks:
+      - name: data
+        mountPath: /data
+        sizeGB: 1
