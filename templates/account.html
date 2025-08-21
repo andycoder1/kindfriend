@@ -1,86 +1,272 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>My Account – AI Coach</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Account · Kind Coach</title>
+  <link rel="icon" href="/static/favicon.ico">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { DEFAULT: '#128C7E', dark: '#075E54', acc: '#25D366' }
+          },
+          boxShadow: {
+            card: '0 10px 30px rgba(2,6,23,0.08)'
+          }
+        }
+      }
+    }
+  </script>
 </head>
-<body class="bg-gray-50 text-gray-800">
-
-  <!-- Top Navigation -->
-  <nav class="bg-white shadow p-4 flex justify-between items-center">
-    <h1 class="text-xl font-bold text-indigo-600">AI Coach</h1>
-    <div>
-      <a href="/dashboard" class="text-gray-600 hover:text-indigo-600 mr-4">Dashboard</a>
-      <a href="/logout" class="text-red-500 hover:text-red-700">Logout</a>
+<body class="min-h-screen bg-gradient-to-b from-slate-50 to-white text-slate-900">
+  <!-- Topbar -->
+  <header class="sticky top-0 z-40 bg-white/70 backdrop-blur border-b border-slate-200">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center gap-4">
+      <a href="/" class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-brand.acc grid place-items-center text-brand.dark font-extrabold">KC</div>
+        <div class="font-extrabold">Kind Coach</div>
+      </a>
+      <span class="ml-2 text-xs px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200" id="plan-chip">Plan</span>
+      <div class="grow"></div>
+      <a href="/app" class="hidden sm:inline-flex px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50">Open App</a>
+      <a href="/pricing" class="hidden sm:inline-flex px-3 py-2 rounded-lg bg-brand text-white hover:bg-brand.dark">Pricing</a>
     </div>
-  </nav>
+  </header>
 
-  <!-- Main Container -->
-  <div class="max-w-4xl mx-auto mt-10 p-6 bg-white shadow rounded-lg">
-    <h2 class="text-2xl font-semibold text-gray-900 mb-6">Account Settings</h2>
+  <!-- Page -->
+  <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Page title -->
+    <div class="mb-8">
+      <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight">Your account</h1>
+      <p class="text-slate-600 mt-1">Manage profile, memories and data controls. Signed in as <span class="font-medium" id="who">…</span>.</p>
+    </div>
 
-    <!-- Profile Section -->
-    <section class="mb-8">
-      <h3 class="text-lg font-medium mb-2">Profile</h3>
-      <form method="post" action="/account/update" class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium">Display Name</label>
-          <input type="text" name="display_name" value="{{ user.display_name }}" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+    <!-- Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+      <!-- Profile & Preferences -->
+      <section class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-card">
+        <div class="p-6 border-b border-slate-200">
+          <h2 class="text-lg font-semibold">Profile & Preferences</h2>
+          <p class="text-sm text-slate-600 mt-1">Update your display name and how the coach addresses you.</p>
         </div>
-        <div>
-          <label class="block text-sm font-medium">Email</label>
-          <input type="email" value="{{ user.email }}" disabled class="mt-1 block w-full rounded-md border-gray-300 bg-gray-100 shadow-sm">
+        <div class="p-6 grid gap-4">
+          <label class="block">
+            <span class="text-sm font-medium text-slate-700">Display name</span>
+            <input id="display-name" class="mt-1 w-full rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand px-4 py-2.5" placeholder="e.g., Alex">
+          </label>
+          <div class="flex items-center gap-3">
+            <button id="save-name" class="px-4 py-2 rounded-xl bg-brand text-white hover:bg-brand.dark">Save name</button>
+            <span class="text-sm text-slate-500" id="name-status"></span>
+          </div>
         </div>
-        <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Save Changes</button>
-      </form>
-    </section>
+      </section>
 
-    <!-- Memory & Preferences -->
-    <section class="mb-8">
-      <h3 class="text-lg font-medium mb-2">Preferences</h3>
-      <form method="post" action="/account/preferences" class="space-y-4">
-        <div class="flex items-center justify-between">
-          <span class="text-sm">Dark Mode</span>
-          <input type="checkbox" name="dark_mode" {% if user.preferences.dark_mode %}checked{% endif %} class="h-5 w-5 text-indigo-600">
+      <!-- Plan & Billing -->
+      <aside class="bg-white rounded-2xl border border-slate-200 shadow-card h-fit">
+        <div class="p-6 border-b border-slate-200">
+          <h2 class="text-lg font-semibold">Plan & Billing</h2>
+          <p class="text-sm text-slate-600 mt-1">Current plan and billing tools.</p>
         </div>
-        <div class="flex items-center justify-between">
-          <span class="text-sm">Enable Notifications</span>
-          <input type="checkbox" name="notifications" {% if user.preferences.notifications %}checked{% endif %} class="h-5 w-5 text-indigo-600">
+        <div class="p-6 grid gap-3">
+          <div class="text-sm text-slate-700">Current plan: <span class="font-semibold" id="plan-name">…</span></div>
+          <form method="post" action="/billing/portal">
+            <button class="w-full px-4 py-2 rounded-xl border border-slate-300 hover:bg-slate-50">Open Billing Portal</button>
+          </form>
+          <a href="/pricing" class="w-full text-center px-4 py-2 rounded-xl bg-brand text-white hover:bg-brand.dark">Explore plans</a>
         </div>
-        <div class="flex items-center justify-between">
-          <span class="text-sm">Save Conversation History</span>
-          <input type="checkbox" name="save_memories" {% if user.preferences.save_memories %}checked{% endif %} class="h-5 w-5 text-indigo-600">
+      </aside>
+
+      <!-- Memories Manager -->
+      <section class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-card">
+        <div class="p-6 border-b border-slate-200 flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-lg font-semibold">Memories</h2>
+            <p class="text-sm text-slate-600 mt-1">You control what’s remembered. Delete anytime.</p>
+          </div>
+          <span class="text-xs px-2 py-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200" id="mem-count-badge">0 saved</span>
         </div>
-        <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">Update Preferences</button>
-      </form>
-    </section>
+        <div class="p-6 grid gap-4">
+          <div class="flex flex-col sm:flex-row gap-3">
+            <input id="new-memory" class="flex-1 rounded-xl border border-slate-300 px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand" placeholder="e.g., I prefer short, practical replies">
+            <button id="add-memory" class="px-4 py-2 rounded-xl bg-brand text-white hover:bg-brand.dark">Add memory</button>
+          </div>
+          <div id="memories-list" class="grid gap-3"></div>
+          <template id="memory-row">
+            <div class="flex items-start justify-between gap-4 rounded-xl border border-slate-200 p-4">
+              <div class="text-sm text-slate-800"></div>
+              <button class="px-3 py-1.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-sm">Delete</button>
+            </div>
+          </template>
+        </div>
+      </section>
 
-    <!-- Manage Data -->
-    <section>
-      <h3 class="text-lg font-medium mb-2">Data Management</h3>
-      <p class="text-sm text-gray-500 mb-4">Download, manage, or delete your saved coaching sessions and chat history.</p>
-      <div class="space-x-3">
-       <div class="flex gap-4">
-  <!-- Download Data -->
-  <a href="/account/download-data" 
-     class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600">
-    Download My Data
-  </a>
+      <!-- Data & Privacy -->
+      <aside class="bg-white rounded-2xl border border-slate-200 shadow-card h-fit">
+        <div class="p-6 border-b border-slate-200">
+          <h2 class="text-lg font-semibold">Data & Privacy</h2>
+          <p class="text-sm text-slate-600 mt-1">Export your data or wipe your chats and memories.</p>
+        </div>
+        <div class="p-6 grid gap-3">
+          <a href="/account/download-data" class="px-4 py-2 rounded-xl border border-slate-300 hover:bg-slate-50 text-center">Download data (.zip)</a>
 
-  <!-- Delete All Chats -->
-  <form method="post" action="/account/clear-chats" class="inline">
-    <button type="submit" 
-            class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600">
-      Delete All Chats
-    </button>
-  </form>
-</div>
+          <button id="open-wipe"
+                  class="px-4 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700">
+            Delete all chats & memories
+          </button>
 
+          <p class="text-xs text-slate-500">
+            This removes all chat messages, sessions, and coaching/memory entries for your account. This action cannot be undone.
+          </p>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- Confirm wipe modal -->
+  <div id="wipe-modal" class="fixed inset-0 z-50 hidden">
+    <div class="absolute inset-0 bg-black/50"></div>
+    <div class="relative mx-auto max-w-lg bg-white rounded-2xl shadow-card border border-slate-200 mt-32 p-6">
+      <h3 class="text-lg font-semibold">Delete everything?</h3>
+      <p class="text-sm text-slate-600 mt-2">
+        This will permanently delete all chats, sessions, memories and coaching records for your account.
+      </p>
+      <div class="mt-6 flex items-center justify-end gap-3">
+        <button id="cancel-wipe" class="px-4 py-2 rounded-xl border border-slate-300 hover:bg-slate-50">Cancel</button>
+        <form id="wipe-form" method="post" action="/account/clear-chats">
+          <button class="px-4 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700">Delete everything</button>
+        </form>
       </div>
-    </section>
+    </div>
   </div>
 
+  <!-- Toast -->
+  <div id="toast" class="fixed top-4 right-4 z-50 hidden">
+    <div class="rounded-xl bg-slate-900 text-white px-4 py-2 shadow-lg text-sm" id="toast-text">Saved</div>
+  </div>
+
+  <script>
+    const who = document.getElementById('who');
+    const planChip = document.getElementById('plan-chip');
+    const planName = document.getElementById('plan-name');
+
+    const displayName = document.getElementById('display-name');
+    const saveName = document.getElementById('save-name');
+    const nameStatus = document.getElementById('name-status');
+
+    const memCountBadge = document.getElementById('mem-count-badge');
+    const newMemory = document.getElementById('new-memory');
+    const addMemory = document.getElementById('add-memory');
+    const memoriesList = document.getElementById('memories-list');
+    const memoryRowTpl = document.getElementById('memory-row');
+
+    const wipeModal = document.getElementById('wipe-modal');
+    const openWipe = document.getElementById('open-wipe');
+    const cancelWipe = document.getElementById('cancel-wipe');
+
+    const toast = document.getElementById('toast');
+    const toastText = document.getElementById('toast-text');
+
+    function showToast(msg) {
+      toastText.textContent = msg;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 2200);
+    }
+
+    async function ensureSignedIn() {
+      const r = await fetch('/api/me');
+      const d = await r.json();
+      if (!d.user) {
+        location.href = '/app?mode=login';
+        return null;
+      }
+      who.textContent = d.user.display_name || d.user.email;
+      displayName.value = d.user.display_name || '';
+      return d.user;
+    }
+
+    async function loadPlan() {
+      const r = await fetch('/api/limits');
+      const d = await r.json();
+      planChip.textContent = d.plan_name || 'Plan';
+      planName.textContent = d.plan_name || 'Free';
+    }
+
+    async function loadMemories() {
+      memoriesList.innerHTML = '';
+      let r = await fetch('/api/memories');
+      if (r.status === 401) {
+        location.href = '/app?mode=login';
+        return;
+      }
+      const d = await r.json();
+      const items = d.memories || [];
+      memCountBadge.textContent = `${items.length} saved`;
+      if (items.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'text-sm text-slate-500';
+        empty.textContent = 'No memories yet.';
+        memoriesList.appendChild(empty);
+        return;
+      }
+      items.forEach(m => {
+        const row = memoryRowTpl.content.firstElementChild.cloneNode(true);
+        row.querySelector('div').textContent = m.note;
+        row.querySelector('button').onclick = async () => {
+          if (!confirm('Delete this memory?')) return;
+          const rr = await fetch('/api/memories/' + m.id, { method: 'DELETE' });
+          const dd = await rr.json();
+          if (dd.ok) { showToast('Deleted'); loadMemories(); }
+          else { showToast('Failed to delete'); }
+        };
+        memoriesList.appendChild(row);
+      });
+    }
+
+    saveName.onclick = async () => {
+      const val = displayName.value.trim();
+      if (!val) { nameStatus.textContent = 'Enter a name'; return; }
+      const r = await fetch('/api/user/display_name', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({display_name: val})
+      });
+      if (r.ok) { nameStatus.textContent = 'Saved'; showToast('Name saved'); ensureSignedIn(); }
+      else { nameStatus.textContent = 'Failed to save'; }
+      setTimeout(() => nameStatus.textContent = '', 1800);
+    };
+
+    addMemory.onclick = async () => {
+      const note = newMemory.value.trim();
+      if (!note) return;
+      const r = await fetch('/api/memories', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({note})
+      });
+      const d = await r.json();
+      if (r.ok) {
+        newMemory.value = '';
+        showToast('Memory added');
+        loadMemories();
+      } else {
+        showToast(d.error || 'Failed to add memory');
+      }
+    };
+
+    // Wipe modal
+    openWipe.onclick = () => wipeModal.classList.remove('hidden');
+    cancelWipe.onclick = () => wipeModal.classList.add('hidden');
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      const user = await ensureSignedIn();
+      if (!user) return;
+      await loadPlan();
+      await loadMemories();
+    });
+  </script>
 </body>
 </html>

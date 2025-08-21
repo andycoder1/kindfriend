@@ -3,24 +3,26 @@ services:
   - type: web
     name: kind-friend
     env: python
-    region: frankfurt            # or oregon/virginia/etc
-    plan: starter                # or free, depending on needs
+    region: frankfurt
+    plan: starter
     autoDeploy: true
 
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
 
-    healthCheckPath: /health
+    # Your app exposes /ping
+    healthCheckPath: /ping
+
     envVars:
       # --- Core app ---
-      - key: SECRET_KEY
-        sync: false              # set in Render dashboard
+      - key: APP_SECRET_KEY        # <- matches app.py
+        sync: false                # set value in Render dashboard
       - key: APP_TZ
         value: Europe/London
       - key: PUBLIC_URL
-        sync: false              # e.g. https://kind-friend.onrender.com
-      - key: DATA_DIR
-        value: /data             # persistent disk mount for SQLite
+        sync: false                # e.g. https://kind-friend.onrender.com
+      - key: APP_DB_PATH           # <- point SQLite at the persistent disk
+        value: /data/app.db
 
       # --- OpenAI ---
       - key: OPENAI_API_KEY
@@ -39,12 +41,11 @@ services:
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRICE_PLUS      # the £4.99/mo Price ID (from Stripe)
+      - key: STRIPE_PRICE_PLUS
         sync: false
-      - key: STRIPE_PRICE_PRO       # the £7.99/mo Price ID (from Stripe)
+      - key: STRIPE_PRICE_PRO
         sync: false
 
-    # Persistent disk for your SQLite database
     disks:
       - name: data
         mountPath: /data

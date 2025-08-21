@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Kind Friend</title>
+  <script>
+    async function checkLogin() {
+      let r = await fetch('/auth/status');
+      let d = await r.json();
+      if (!d.logged_in) {
+        document.getElementById('loginModal').style.display='block';
+      }
+    }
+    async function login() {
+      let fd = new FormData(document.getElementById('loginForm'));
+      let r = await fetch('/auth/login',{method:'POST',body:fd});
+      if(r.ok) location.reload();
+      else alert('Login failed');
+    }
+    window.onload=checkLogin;
+  </script>
+  <style>
+    #loginModal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.5);}
+    #loginModal div{background:#fff;padding:20px;margin:100px auto;width:300px;}
+  </style>
+</head>
+<body>
+  <div id="loginModal">
+    <div>
+      <h3>Login</h3>
+      <form id="loginForm" onsubmit="event.preventDefault();login();">
+        <input name="email" placeholder="Email"><br>
+        <input type="password" name="password" placeholder="Password"><br>
+        <button type="submit">Login</button>
+      </form>
+      <a href="#" onclick="alert('Use /auth/forgot via API for now')">Forgot password?</a>
+    </div>
+  </div>
+  <h1>Welcome to Kind Friend</h1>
+</body>
+</html>
